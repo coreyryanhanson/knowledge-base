@@ -93,9 +93,26 @@ Why this shape:
    "get children" tool. Reconstructing a full outliner tree needs the CLI
    `query` (Datalog pull with `{:block/page ...}` + `:block/children`) or a
    recursive walk you implement yourself.
-2. **Property _values_ on nodes** — `upsertNodes` defines properties and
-   assigns tags, but does **not** set arbitrary property values on a block
-   (e.g. `:status`, `:due-date`). This is the biggest KB gap. Defer (see §6).
+2. **Property _values_ on nodes (MCP only)** — `upsertNodes` defines
+   properties and assigns tags, but does **not** set arbitrary property values
+   on a block (e.g. `:status`, `:due-date`) via MCP. **Note: this is an MCP-path
+   gap, not a hard block** — the CLI `upsert block --update-properties '{…}'`
+   and `upsert page --update-properties '{…}'` commands set property values
+   today (`src/main/logseq/cli/command/upsert.cljs:45,55,367-388,399-437`). So
+   the deferral in §6 is a **design choice** (avoid premature schema), not a
+   technical impossibility; the bridge exists now via the same CLI path the
+   plan already uses for nesting. See §6.
+
+   Separately: **Logseq ships a native semantic-search subsystem** that this
+   section previously didn't mention. When the user setting
+   `:feature/enable-semantic-search?` is on, MCP `searchBlocks` already
+   returns vector-ranked hybrid results from a zvec index + a local
+   `all-MiniLM-L6-v2` embedding server
+   (`src/electron/electron/embedding_server.cljs`,
+   `src/electron/electron/configs.cljs:51`,
+   `src/main/frontend/state.cljs:554`). The plan's decision is to **build the
+   sidecar and disable native semantic search** — see §5 "Native semantic
+   search" and `vector-logseq.md` §6a–6b.
 3. No arbitrary Datalog (use CLI for that).
 4. No namespaces/property-values handling.
 
@@ -179,6 +196,45 @@ A successful initialize response (with an `mcp-session-id` header) means the
 foundation is real. Then issue `tools/call` with `listPages` to confirm a graph
 read round-trips. **Do this before writing the plugin.**
 
+### CLI-over-bridge probe (separate auth surface — de-risk in the same step)
+
+The plan relies on the `logseq` CLI `query` for nested-block reads and
+retraction detection (`:logseq.property/deleted-at`). The CLI is a **separate
+process/transport from the MCP HTTP server** — it talks to the same desktop app
+but via a different path, so the §3 MCP probe above does **not** cover it. This
+was previously hand-waved in §4 (`kb_get_page_tree`) and §5 ("Indexing source —
+CLI path"); make it explicit now.
+
+Two viable shapes — pick whichever the CLI actually supports (verify with
+`logseq query --help` / `logseq --help` on the host before committing):
+
+1. **CLI on the VM, pointed at the host.** Confirm the CLI accepts a remote
+   `--host`/`--token` (or `--server-url`) against the desktop app's worker node,
+   i.e. it can be a network client like the MCP path. If yes, the VM runs
+   `logseq query --host <host-ip> --token <TOKEN> …` directly.
+2. **CLI on the host, invoked over the bridge.** If the CLI can only open a
+   local graph (no remote-client mode), run `logseq` **on the host** and invoke
+   it from the VM over SSH / a bridge exec helper: `ssh host logseq query …`.
+   The VM never opens the graph file; the host CLI does.
+
+Probe (run from the VM, covers both shapes):
+
+```bash
+# Shape 1: CLI-as-network-client (preferred if supported)
+logseq query --host <host-ip> --token <TOKEN> --graph <graph> \
+  --output json --query '[:find ?e :where [?e :block/uuid]]' | head -c 200
+
+# Shape 2: host-CLI-over-SSH (fallback)
+ssh <host> 'logseq query --graph <graph> --output json \
+  --query "[:find ?e :where [?e :block/uuid]]"' | head -c 200
+```
+
+A JSON array response confirms the CLI path round-trips for nested pulls. Fold
+this probe into build-order step 1 alongside the MCP curl probe — **do not
+start the indexer or `kb_get_page_tree` until both the MCP and CLI paths are
+confirmed**, because retraction detection and full-tree reads both depend on
+the CLI path.
+
 ---
 
 ## 4. Pi plugin scope (build on the working endpoint)
@@ -225,7 +281,7 @@ Adjustments for the host-DB / VM-agent split:
 
 ### Sidecar schema (`vectors.sqlite`, sqlite-vec)
 
-- `block_embeddings` virtual table (`vec0`, dim = your embedder, e.g. 768)
+- `block_embeddings` virtual table (`vec0`, dim = your embedder — **1024 for `BAAI/bge-m3`**, the chosen default; see "Native semantic search" below and `vector-logseq.md` §6a for model choice)
 - `blocks_meta`: `uuid` (PK, = `:block/uuid`), `graph`, `page_uuid`,
   `page_title`, `title` (= `:block/title`, the embeddable text),
   `created_at`, `updated_at` (= `:block/updated-at`, drives incremental reindex),
@@ -255,18 +311,72 @@ pull including {:block/page ...} and :block/children>'` run against the host
 
 - Reindex where `updated_at > embedded_at` (MCP `getPage` returns
   `:block/updated-at`; `remove-hidden-properties` keeps it).
-- Tombstone UUIDs the source no longer returns (`deleted=1`); periodic full
-  sweep to detect retractions.
-- Model swap: re-embed rows where `model <> ?`.
+- Tombstone UUIDs the source no longer returns (`deleted=1`); **periodic full
+  sweep to detect retractions** — name the trigger explicitly: a systemd timer /
+  cron / launchd job (e.g. hourly incremental + daily full sweep). Incremental
+  alone cannot catch retractions.
+- **Retraction detection needs the CLI path.** `:logseq.property/deleted-at` is
+  how recycled blocks are identified (`src/main/logseq/cli/command/search.cljs`
+  walks `{:block/parent …}` to drop them), but MCP `getPage` strips it. So even
+  if indexing uses the MCP path, the retraction sweep must use the CLI `query`
+  pull (with `:logseq.property/deleted-at`) — this is the concrete reason the
+  CLI-over-bridge probe (§3) is a build-order gate, not optional.
+- Model swap: re-embed rows where `model <> ?` (full re-embed — model choice is
+  a schema decision; see `vector-logseq.md` §6a).
 
 ### Hybrid retrieval
 
 - Semantic: `vec0` KNN over `block_embeddings` joined to `blocks_meta` by rowid.
-- Keyword: Logseq's own `searchBlocks` (FTS5) via MCP — no need to re-implement.
-- Merge by UUID; upgrade to Reciprocal Rank Fusion (RRF) once you have rank
-  lists from both sides: `score(d) = Σ 1/(k + rank_i(d))`, k ≈ 60.
+- Keyword: Logseq's own `searchBlocks` (FTS5 trigram via the search worker) via
+  MCP — **not** the CLI `search block` command (which is a lowercased-substring
+  Datalog scan and emits no `:block/uuid`; see `vector-logseq.md` §5 for the
+  corrected, authoritative example). No need to re-implement FTS5.
+- Merge by UUID with **Reciprocal Rank Fusion (RRF)**:
+  `score(d) = Σ 1/(k + rank_i(d))`, k ≈ 60. (Both sides return ranked lists, so
+  go straight to RRF rather than a plain union.)
 - Agent resolves a hit's UUID → fetch full context via `kb_get_page` /
   `kb_get_page_tree`.
+
+### Native semantic search — decision: build the sidecar, disable Logseq's native
+
+Logseq already ships a native semantic-search subsystem: an `embedding-server`
+running `sentence-transformers` with model `all-MiniLM-L6-v2`
+(`src/electron/electron/embedding_server.cljs:9`), backed by a `vector-index` at
+`search/vector`, consulted by the search worker when the user setting
+`:feature/enable-semantic-search?` is on (`src/electron/electron/configs.cljs:51`,
+`src/main/frontend/state.cljs:554`, `src/main/frontend/components/settings.cljs:566`).
+**When enabled, MCP `searchBlocks` already returns vector-ranked hybrid results**
+— a capability this plan previously didn't account for.
+
+**Decision: build the `vectors.sqlite` sidecar and keep
+`:feature/enable-semantic-search?` off.** Full rationale in `vector-logseq.md`
+§6a–6b; short version:
+
+- The native index uses `all-MiniLM-L6-v2` (MTEB 56.3, ~4 years old, dead last
+  among established retrieval models — meaningfully outdated). The sidecar uses
+  `BAAI/bge-m3` (MTEB ~63.0).
+- Native zvec is **not UUID-keyed**, so it can't join to `edges.sqlite` — which
+  the gbrain-parity typed-edge graph (§9) requires. The sidecar is UUID-keyed.
+- If both were on, two vector stores would rank the same blocks with different
+  models/scores and `kb_find_notes`'s merge would be undefined. One ranking
+  source of truth → native off.
+
+This is a conscious choice, not an oversight: the UUID-keyed join to
+`edges.sqlite` is the deciding factor. Keep the MCP/CLI choice behind one
+interface so a future Logseq MCP upgrade (nested children, property values, a
+UUID-keyed native index) can swap in cheaply.
+
+### Cross-sidecar freshness watermark
+
+There are up to **four** derived indexes around this KB: KB vectors
+(`vectors.sqlite`), KB typed edges (`edges.sqlite`), code chunks+edges
+(`code_chunks.sqlite`/`code_edges.sqlite`, see `code-layer-plan.md`), and — if
+it were enabled — Logseq's native zvec (disabled per above). Each carries its
+own `embedded_at` / `indexed_at`. The synthesis/query layer treats the
+**minimum** `embedded_at`/`indexed_at` across the sidecars it joins as the
+"fresh as of" watermark for any cross-index result, and treats any join across
+indexes of different freshness as _under-recall to be flagged by gap analysis_,
+not a wrong answer. (Parallel statement in `code-layer-plan.md` §7.)
 
 ### Hard rules (from the schema, verified)
 
@@ -278,24 +388,48 @@ pull including {:block/page ...} and :block/children>'` run against the host
 
 ---
 
-## 6. Structured property values — deliberately deferred
+## 6. Structured property values — deliberately deferred (by design, not blocked)
 
 `upsertNodes` sets property _definitions_ and tags, not property _values_ on
-blocks (e.g. `:status`, `:due-date`, `:source-url`). That's the one real KB
-gap. Recommendation: **start with tags + page refs + hierarchy only.** You
-can't design a property schema for knowledge you haven't captured yet; premature
+blocks (e.g. `:status`, `:due-date`, `:source-url`) via MCP. **Important:**
+this is an **MCP-path gap, not a hard block.** The CLI `upsert block
+--update-properties '{…}'` and `upsert page --update-properties '{…}'` commands
+set property values today
+(`src/main/logseq/cli/command/upsert.cljs:45,55,367-388,399-437` — parses an
+EDN map → `:update-properties` and applies it). That is the **same CLI path the
+plan already relies on for nested reads** (§5 "Indexing source — CLI path"),
+so the bridge exists now.
+
+Recommendation: **start with tags + page refs + hierarchy only.** You can't
+design a property schema for knowledge you haven't captured yet; premature
 typed fields ossify into friction. Design the plugin so property-value support
-is a clean slot filled later when either (a) Logseq ships it in the MCP server,
-or (b) a clear repeated need surfaces in your actual notes (then bridge via CLI
-or a direct Datalog write path, never raw SQLite).
+is a clean slot filled later when **a clear repeated need surfaces in your
+actual notes** — then bridge via CLI `upsert … --update-properties` (never raw
+SQLite). If/when Logseq ships property-value setting in the MCP server, swap the
+bridge to MCP behind the same interface.
+
+**Why this matters for §9:** because property values are reachable via CLI
+today, §9 option-1 (typed edges as Logseq block properties) is **not** dead —
+it's a viable **future migration path** off the `edges.sqlite` sidecar if
+Logseq property-values become first-class and you want the edge graph inside
+the page store instead of a derived index. The chosen path for v1 is still the
+`edges.sqlite` sidecar (§9 option-2), but the reason is "derived index matches
+the gbrain model and keeps Logseq untouched," **not** "properties are
+impossible."
 
 ---
 
 ## 7. Build order
 
 1. **De-risk the network path (host-side).** Rebind MCP server to VM-facing
-   iface; set `allowedHosts`; create token; run the §3 curl probe from the VM.
-   ~15 min. Stops everything if this doesn't round-trip.
+   iface; set `allowedHosts`; create token; run the §3 MCP curl probe **and**
+   the §3 CLI-over-bridge probe from the VM. ~15 min. **Stops everything if
+   either doesn't round-trip** — the CLI path is required for retraction
+   detection and nested reads (§5), so it's a gate, not optional. While you
+   have a server up, also run the §8 headless-MCP-surface probe (one `curl
+   tools/call upsertNodes` against a CLI-started server) to determine whether
+   the "always-on agent" fallback is real or aspirational — that result shapes
+   how much abstraction to put behind the MCP/CLI interface now.
 2. **Minimal plugin: read + safe write.** `kb_list_pages`, `kb_get_page`,
    `kb_find_notes`, `kb_add_note`, `kb_append_inbox` + dry-run-by-default
    policy. Validate against a throwaway test graph: agent reads, appends, you
@@ -313,9 +447,21 @@ or a direct Datalog write path, never raw SQLite).
 ## 8. Risks / eyes-open
 
 - **App must be running** for the agent to act (MCP server lives in the desktop
-  process). If "always-on agent while I'm away" matters later, repoint the
-  plugin at the CLI-started MCP server (headless) by changing one endpoint —
-  keep that abstraction now.
+  process). The previously-stated mitigation — "repoint the plugin at the
+  CLI-started MCP server (headless) by changing one endpoint" — is **unverified
+  and likely wrong as written**: the `logseq server` CLI command
+  (`src/main/logseq/cli/command/server.cljs`) starts a `db-worker-node`, **not**
+  the MCP HTTP server, so it is not a drop-in headless replacement for the
+  desktop MCP endpoint. Whether a CLI-started process exposes the **same MCP
+  tool surface** (incl. `tools/call upsertNodes`) as the desktop app is unknown
+  and must be probed, not assumed. **Probe (fold into build-order step 1):**
+  start whatever CLI server mode exists and issue a `curl … tools/call
+  upsertNodes` with `dry-run: true`; if the tool is present and round-trips,
+  the always-on path is real (keep the MCP/CLI choice behind one interface so
+  the swap is cheap); if not, the "always-on agent" is a deferred dependency on
+  a future Logseq feature, and the plugin should be designed to degrade
+  gracefully when the desktop app is down (queue writes, surface a
+  "Logseq not running" status) rather than assume a headless endpoint exists.
 - **`allowedHosts` strictness** — if the VM's view of the host changes
   (IP/hostname), the MCP transport rejects until updated. Pin the VM-facing
   hostname.
@@ -366,17 +512,30 @@ Logseq has page refs (`[[page]]`) and tags but **no native typed verb edge** —
 gbrain's core moat ("who works at Acme?" queries). Three options:
 
 1. As Logseq properties on blocks (`:works-at` node-type property → Acme).
-   Cleanest in principle, but **blocked by the MCP property-values gap (§6)** —
-   `upsertNodes` can't set property values yet. ❌ don't pick this today.
+   Cleanest in principle. **Not blocked** — the CLI `upsert block
+   --update-properties` path sets property values today (§6, verified at
+   `src/main/logseq/cli/command/upsert.cljs:45,55,367-388`). So this is a
+   **viable future migration path** off the `edges.sqlite` sidecar if Logseq
+   property-values become first-class (e.g. MCP gains a property-value setter)
+   and you want the edge graph inside the page store. **Not chosen for v1**
+   because (a) it co-mingles a derived, regex/NER-extracted graph with the
+   source-of-truth page store (loses the "Logseq never touches files it doesn't
+   own" property), and (b) it bakes a verb schema into Logseq properties that's
+   expensive to change once written into real blocks. Revisit after the
+   `edges.sqlite` graph is proven and a stable verb set exists.
 2. **As a sidecar `edges.sqlite`** (`from_uuid`, `to_uuid`, `verb`, `context`,
    `source`) populated by the same regex/NER gazetteer gbrain uses, running over
    block text pulled via CLI `query`. Keyed by the same `:block/uuid`s the
-   vector sidecar uses. ✅ **The right call.** It's exactly what gbrain does —
-   the typed-edge graph is a _derived index over prose_, same as vectors. Keeps
-   it external to the page store; sidesteps the MCP property-value gap entirely;
-   Logseq never touches a file it doesn't own (same principle as the vector
-   sidecar). Lift gbrain's verb set + regex shapes from `src/core/extract-ner.ts`
-   and `src/core/schema-pack/link-inference.ts`.
+   vector sidecar uses. ✅ **The chosen call for v1.** It's exactly what gbrain
+   does — the typed-edge graph is a _derived index over prose_, same as
+   vectors. Keeps it external to the page store (Logseq never touches a file it
+   doesn't own, same principle as the vector sidecar); the regex/NER extraction
+   is deterministic and cheaply rebuildable, so the sidecar is an expendable
+   build artifact. Lift gbrain's verb set + regex shapes from
+   `src/core/extract-ner.ts` and `src/core/schema-pack/link-inference.ts`.
+   Rationale corrected from a prior version: the reason is the separation-of-
+   concerns + rebuildability, **not** "MCP can't set property values" (it can,
+   via CLI — see §6).
 3. As verb-as-tag (`#works-at/acme`). Hacky, loses the to-UUID link. ❌
 
 So: add **one more sidecar** (`edges.sqlite`) + a graph-traversal query layer

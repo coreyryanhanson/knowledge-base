@@ -289,11 +289,20 @@ surfaces the recency seam rather than silently returning a wrong answer.
 
 ### Cross-sidecar consistency
 
-Three sidecars (KB vectors, KB typed edges, code chunks+edges) derive from
-different sources at different times, so a query joining across them can hit one
-fresh and another stale. The synthesis layer treats under-recall as first-class:
-it retrieves what's available and the gap section says what's missing. Stale
+Up to four derived indexes surround this KB (KB vectors `vectors.sqlite`, KB
+typed edges `edges.sqlite`, code chunks+edges `code_chunks.sqlite`/
+`code_edges.sqlite`, and — if it were enabled — Logseq's native zvec, which is
+disabled per `kb-architecture-plan.md` §5). They derive from different sources
+at different times, so a query joining across them can hit one fresh and
+another stale. The synthesis layer treats under-recall as first-class: it
+retrieves what's available and the gap section says what's missing. Stale
 indexes produce _under-recall, flagged_, not _wrong answers_.
+
+**Watermark rule:** each sidecar carries its own `embedded_at` / `indexed_at`.
+For any cross-index join, the synthesis layer takes the **minimum**
+`embedded_at`/`indexed_at` across the joined sidecars as the "fresh as of"
+watermark for that result, so callers know the result is only as current as the
+stalest contributor. (Parallel statement in `kb-architecture-plan.md` ��5.)
 
 ---
 
