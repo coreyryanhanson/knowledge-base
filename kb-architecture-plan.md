@@ -33,9 +33,12 @@ for RAG keyed by Logseq block UUIDs.
 - **Block text lives in `:block/title`** in DB graphs (there is no `:block/content`). Confirmed in the schema.
 
 **Bottom line:** MCP is a real, typed, validated read/write surface over
-individual blocks (UUID + title + timestamps). For a vector index you can pull
-top-level blocks per page via MCP. For full nested-block coverage or arbitrary
-Datalog, use the `logseq` CLI `query` over the same network path.
+individual blocks (UUID + title + timestamps). The plugin is **MCP-only**: it
+pulls top-level blocks per page via MCP and detects retractions via MCP
+`searchBlocks` (which already filters deleted blocks — see §5). The `logseq`
+CLI is **not** a fallback path (see §3 for why). Nested child blocks are not
+readable via MCP today; that's a known gap with a named roadmap tool (`getBlock`)
+— see §2 and §5.
 
 ---
 
@@ -51,13 +54,13 @@ HOST (your machine — full GUI visibility here)
 │
 VM (Firecracker) — agent + retrieval, isolated blast radius
 ├─ Pi agent + KB plugin
-│   └─ MCP client → host endpoint over the network bridge
+│   └─ MCP client → host endpoint over the network bridge (the ONLY host surface)
 │        writes: upsertNodes (dry-run-first)
 │        reads:  listPages / getPage / listTags / listProperties / searchBlocks
 ├─ vector sidecar: vectors.sqlite (sqlite-vec)
-│   └─ indexer pulls blocks from host (MCP top-level, or CLI query for nesting)
+│   └─ indexer pulls blocks from host via MCP (top-level only until getBlock ships)
 │   └─ hybrid_search() feeds agent retrieval
-└─ (optional) logseq CLI client → host graph, for arbitrary Datalog pulls
+└─ (no CLI path — the logseq CLI is localhost-only and cannot be a VM fallback; see §3)
 ```
 
 Why this shape:
@@ -87,21 +90,29 @@ Why this shape:
   (uuid list), `:property-type`, `:property-cardinality`, `:property-classes`,
   `:class-extends`, `:class-properties`
 
-### Known MCP gaps (still true despite the strong block read/write)
+### Known MCP gaps (and the roadmap that closes them)
 
-1. **Nested block children** — `getPage` returns top-level only. No
-   "get children" tool. Reconstructing a full outliner tree needs the CLI
-   `query` (Datalog pull with `{:block/page ...}` + `:block/children`) or a
-   recursive walk you implement yourself.
-2. **Property _values_ on nodes (MCP only)** — `upsertNodes` defines
-   properties and assigns tags, but does **not** set arbitrary property values
-   on a block (e.g. `:status`, `:due-date`) via MCP. **Note: this is an MCP-path
-   gap, not a hard block** — the CLI `upsert block --update-properties '{…}'`
-   and `upsert page --update-properties '{…}'` commands set property values
-   today (`src/main/logseq/cli/command/upsert.cljs:45,55,367-388,399-437`). So
-   the deferral in §6 is a **design choice** (avoid premature schema), not a
-   technical impossibility; the bridge exists now via the same CLI path the
-   plan already uses for nesting. See §6.
+1. **Nested block children** — `getPage` returns top-level only; there is no
+   "get children" tool. **This is the one real gap for this plan, and it is a
+   known roadmap item, not a design boundary.** Per the official MCP server PR
+   ([logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), merged
+   Oct 29 2025), the maintainer lists under "features that will come later":
+   "block children - reading and writing," and the approving review lists
+   `getBlock - include children` (plus `getManyBlocks` / `getManyPages` batch
+   reads) under "still need to be added." As of this writing (June 2026) those
+   tools are **not yet implemented** in the shipped tree (`mcp_server.cljs`
+   defines only the six tools above; `getBlock`/`getManyBlocks` appear nowhere).
+   So: nested reads are **planned, with a named tool, from the server's owner,
+   against an actively-maintained server** — but undated. The plan designs for
+   top-level-only indexing now and upgrades to `getBlock` when it ships (see
+   §5). **The `logseq` CLI is not a fallback for this** (§3).
+2. **Property _values_ on nodes** — `upsertNodes` defines properties and
+   assigns tags, but does **not** set arbitrary property values on a block
+   (e.g. `:status`, `:due-date`) via MCP. Same roadmap source as #1 lists "read
+   and writing of properties for any node type" and "anything related to
+   namespaces or property values" as coming-later. So property values are
+   **deferred until MCP ships a setter** — not bridged via the CLI (§3). The
+   deferral is also a design choice (avoid premature schema); see §6.
 
    Separately: **Logseq ships a native semantic-search subsystem** that this
    section previously didn't mention. When the user setting
@@ -113,8 +124,10 @@ Why this shape:
    `src/main/frontend/state.cljs:554`). The plan's decision is to **build the
    sidecar and disable native semantic search** — see §5 "Native semantic
    search" and `vector-logseq.md` §6a–6b.
-3. No arbitrary Datalog (use CLI for that).
-4. No namespaces/property-values handling.
+3. No arbitrary Datalog. (The CLI exposes Datalog via `logseq query`, but the
+   CLI is not reachable from the VM — §3. So in practice this plan has no
+   Datalog escape hatch; it works within the MCP tool surface.)
+4. No namespaces/property-values handling (same roadmap as #2).
 
 ### Mental model: MCP page vs. markdown document
 
@@ -147,17 +160,24 @@ rather than "markdown documents."** Two concrete differences:
    is returned as `["Top bullet", "Another top bullet"]`; the nested points are
    invisible unless fetched separately. A markdown file gives you the whole
    tree in one read. This is the one place MCP reads are **not** a drop-in for
-   "read the markdown file." Mitigation: the CLI `query` path (Datalog pull with
-   `:block/children`) reads the full tree in one call — see §5 "Indexing source"
-   and the `kb_get_page_tree` tool in §4. Writes have no equivalent gap:
-   `upsertNodes` adds blocks to a page by `:page-id`, and nested writes are a
-   recursive sequence of add-block ops (covered in phase 5 of the build order).
+   "read the markdown file." **There is no MCP-side mitigation today** — the
+   plan indexes top-level blocks only and authors flat (see §5 and the build
+   order). When Logseq ships `getBlock - include children` (planned, per
+   [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111); not yet
+   implemented as of June 2026), the plugin's read interface upgrades to full
+   trees with no rewrite — design that interface now (a single `fetch_block_tree`
+   call that today returns top-level and later returns nested). Writes have no
+   equivalent gap: `upsertNodes` adds blocks to a page by `:page-id`, and
+   nested writes are a recursive sequence of add-block ops (covered in phase 5
+   of the build order).
 
 **Net:** if the KB is mostly flat top-level bullets, MCP alone is ~zero
-friction vs. markdown. If it leans on nesting, the cost is one CLI fallback for
-reads + recursive writes — bounded, and already in the plan. Either way, prefer
-"atomic note per bullet" as the authoring model; it is both what Logseq DB is
-and what suits an agent-maintained KB best.
+friction vs. markdown. If it leans on nesting, the cost is real and **not
+bridgeable today** — nested reads are blocked on Logseq shipping `getBlock`
+(planned, undated). The recommended authoring model is "atomic note per top-level
+bullet," which is both what Logseq DB is and what suits an agent-maintained,
+MCP-only KB best. Either way, prefer flat authoring; the plugin should not assume
+nested reads exist.
 
 ---
 
@@ -196,69 +216,55 @@ A successful initialize response (with an `mcp-session-id` header) means the
 foundation is real. Then issue `tools/call` with `listPages` to confirm a graph
 read round-trips. **Do this before writing the plugin.**
 
-### CLI-over-bridge probe (separate auth surface — de-risk in the same step)
+### No CLI fallback (and why)
 
-The plan relies on the `logseq` CLI `query` for nested-block reads and
-retraction detection (`:logseq.property/deleted-at`). The CLI is a **separate
-process/transport from the MCP HTTP server** — it talks to the same desktop app
-but via a different path, so the §3 MCP probe above does **not** cover it. This
-was previously hand-waved in §4 (`kb_get_page_tree`) and §5 ("Indexing source —
-CLI path"); make it explicit now.
+The `logseq` CLI is **not a fallback path** for this plan, for two independent
+reasons — either one is disqualifying:
 
-Two viable shapes — pick whichever the CLI actually supports (verify with
-`logseq query --help` / `logseq --help` on the host before committing). Both
-keep the VM a **pure HTTP/CLI network client with no inbound or shell channel
-to the host** — the whole point of the Firecracker isolation model is that the
-VM must not be able to open an interactive path into the host.
+1. **The CLI is localhost-only; it cannot be a VM network client.** The CLI is
+   an HTTP client to a **local** `db-worker-node` that it spawns and manages.
+   Verified in source: discovery pings `127.0.0.1` only
+   (`src/main/logseq/cli/server.cljs:243` `fetch-healthz {:host "127.0.0.1"
+   :port port}`); `ensure-server!` calls `spawn-server!` with a **local script
+   path** and **local repo dir**; `transport/invoke` builds its base-url from
+   the locally-spawned daemon's host/port. There is **no** `--host`/`--token`/
+   `--server-url` flag, no `LOGSEQ_CLI_HOST/PORT/SERVER` env var, and no remote-
+   client config key anywhere in `src/main/logseq/cli/` (grep returns zero
+   matches). So `logseq query --host <host-ip> …` from the VM is not a real
+   command — the flag doesn't exist. Making the CLI talk to a remote db-worker
+   would require patching Logseq, not config.
+2. **Any VM→host shell/exec channel is rejected by the isolation model.** The
+   remaining way to use the host's CLI from the VM would be SSH or a host-side
+   exec shim. SSH-from-VM-to-host gives the isolated VM an interactive shell
+   into the host, negating the entire purpose of the Firecracker VM (the
+   blast-radius boundary exists so the agent cannot reach the host's execution
+   surface). A host-side HTTP shim wrapping `logseq query` is less dangerous
+   than SSH but still adds host-side glue the user must install and maintain —
+   which defeats the goal of a **portable plugin that works on any Logseq
+   install with the MCP server enabled**.
 
-1. **CLI on the VM, pointed at the host (preferred).** Confirm the CLI accepts
-   a remote `--host`/`--token` (or `--server-url`) against the desktop app's
-   worker node, i.e. it can be a network client like the MCP path. If yes, the
-   VM runs `logseq query --host <host-ip> --token <TOKEN> …` directly. This is
-   the clean option: same trust model as the MCP path, no host-side glue.
-2. **Host-side CLI-over-HTTP shim (fallback if the CLI has no remote-client
-   mode).** Run a tiny read-only HTTP endpoint **on the host** that wraps
-   `logseq query` — e.g. a small Flask/FastAPI/Express app listening on the VM
-   bridge iface, with Bearer auth, that takes a `query` param, shells out to
-   the local `logseq query --output json`, and returns the JSON. The VM calls
-   it with `curl` (or the plugin's HTTP client). The VM stays a pure HTTP
-   client; it never gets a shell on the host, never opens the graph file, and
-   the shim is scoped to **read-only `query` only** (no `upsert`, no arbitrary
-   command execution). This is strictly less privileged than option 1 and far
-   less privileged than any shell/SSH path.
+**Therefore: the plugin is MCP-only.** The VM's reachable surface is exactly
+**outbound HTTP to the host's MCP endpoint** — no inbound, no shell, no SSH, no
+host-side shim to install. The consequences, accepted deliberately:
 
-**Explicitly rejected: SSH / exec-from-VM-into-host.** Giving the isolated VM
-an interactive shell channel into the host (e.g. `ssh <host> logseq …`) would
-negate the purpose of the Firecracker VM — the blast-radius boundary exists so
-the agent cannot reach the host's execution surface. Any fallback that
-requires the VM to invoke a shell on the host is out of bounds by design, even
-as a "last resort." If neither option 1 nor the read-only HTTP shim works, the
-CLI path is simply unavailable and the plan must fall back to **MCP-only
-coverage** (top-level blocks, no native retraction detection — see §5) until
-Logseq ships nested reads or `:logseq.property/deleted-at` through MCP, rather
-than compromise the isolation boundary.
+- **Nested block reads are not available** until Logseq ships `getBlock -
+  include children` via MCP (planned per
+  [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), not yet
+  implemented as of June 2026). The plan indexes top-level blocks only and
+  authors flat (§5). No CLI workaround.
+- **Retraction detection does not need the CLI.** MCP `searchBlocks` already
+  filters deleted/recycled blocks out of its results (it pulls
+  `:logseq.property/deleted-at` and applies `hidden-entity?`, which checks
+  `deleted-at` and walks `:block/parent` — `search.cljs:607,1000`,
+  `entity_util.cljs:64-66`). So "UUID no longer returned by `searchBlocks`/
+  `getPage`" is a valid retraction signal under MCP-only. See §5.
+- **Property values are deferred** until MCP ships a setter (same roadmap as
+  `getBlock`). Not bridged via CLI `upsert --update-properties`. See §6.
+- **No arbitrary Datalog.** The plan works within the six MCP tools; there is
+  no Datalog escape hatch from the VM.
 
-Probe (run from the VM, covers option 1 first, then option 2 only if needed):
-
-```bash
-# Option 1: CLI-as-network-client (preferred)
-logseq query --host <host-ip> --token <TOKEN> --graph <graph> \
-  --output json --query '[:find ?e :where [?e :block/uuid]]' | head -c 200
-
-# Option 2 (only if option 1 fails): host-side read-only HTTP shim
-#   (shim itself is a small host process you stand up first; the VM only does this:)
-curl -sS -G http://<host-ip>:<shim-port>/query \
-  -H "Authorization: Bearer <SHIM-TOKEN>" \
-  --data-urlencode 'graph=<graph>' \
-  --data-urlencode 'query=[:find ?e :where [?e :block/uuid]]' | head -c 200
-```
-
-A JSON array response confirms the CLI path round-trips for nested pulls. Fold
-this probe into build-order step 1 alongside the MCP curl probe — **do not
-start the indexer or `kb_get_page_tree` until both the MCP and CLI paths are
-confirmed**, because retraction detection and full-tree reads both depend on
-the CLI path.
-
+This keeps the plugin portable (zero host glue) and the VM's attack surface
+minimal. The single gating probe is the MCP curl probe above — nothing else
 ---
 
 ## 4. Pi plugin scope (build on the working endpoint)
@@ -272,12 +278,16 @@ The plugin is a thin MCP client + KB-shaped tool surface + guardrails. It does
 - `kb_get_page` → `getPage` (present top-level blocks readably; expose uuid+title+updated_at)
 - `kb_find_notes` → `searchBlocks` (term search over blocks)
 - `kb_list_tags` / `kb_list_properties` → list tools
-- `kb_get_page_tree` _(plugin-level)_ → recursive walk to rebuild a nested
-  tree. Caveat: MCP has no get-children, so this either (a) limits depth to
-  top-level, or (b) uses the CLI `query` path from §3 (Datalog pull with
-  `:block/children`) — either the CLI-as-network-client option or the host-side
-  read-only HTTP shim, **never** a shell/exec channel from the VM into the
-  host (rejected in §3). Recommend (b) when nesting matters.
+- `kb_get_page_tree` _(plugin-level)_ → returns a block tree for a page.
+  **Today: top-level only** — `getPage` strips `:block/children`, MCP has no
+  get-children tool, and the CLI is not a fallback (§3). So this returns the
+  same top-level blocks as `kb_get_page`, just shaped as a one-level tree.
+  **When Logseq ships `getBlock - include children`** (planned per
+  [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), not yet
+  implemented), this tool upgrades to a full recursive tree with no plugin
+  rewrite — it sits behind the same `fetch_block_tree` interface the indexer
+  uses (§5). Design that interface now so the upgrade is a one-line backend
+  swap, not a rewrite.
 
 ### Write tools (wrap `upsertNodes`, batched, dry-run-first)
 
@@ -320,20 +330,28 @@ Adjustments for the host-DB / VM-agent split:
   host over the bridge. Or host sibling dir — either works. Keep it **out** of
   the graph directory so Logseq backup/restore can't clobber it.
 
-### Indexing source — choose by coverage need
+### Indexing source — MCP only
 
-- **MCP path (simple, one channel):** iterate `listPages` → `getPage` each →
-  embed each top-level block's `:block/title` with its `:block/uuid` +
-  `:block/updated-at`. Covers **top-level blocks only**. Good enough to start.
-- **CLI path (full nesting):** `logseq query --output json --query '<Datalog
-pull including {:block/page ...} and :block/children>'` run against the host
-  graph over the bridge. Covers nested blocks. Use when you want every block
-  indexed, or when you need attrs MCP strips (e.g. `:logseq.property/deleted-at`
-  for recycled-block filtering).
-- Recommend: **start MCP, move to CLI query only when top-level coverage is
-  insufficient.** One auth/network path to maintain first.
+- **The only path.** Iterate `listPages` → `getPage` each → embed each top-level
+  block's `:block/title` with its `:block/uuid` + `:block/updated-at`. Covers
+  **top-level blocks only**. There is no CLI alternative (§3) and no nested-
+  read MCP tool yet.
+- **Nested blocks are not indexed today.** This is the known gap: `getPage`
+  strips `:block/children`, and `getBlock - include children` is planned but
+  not yet shipped (per
+  [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), as of
+  June 2026). When `getBlock` ships, the indexer's `fetch_block_tree` helper
+  upgrades from "top-level blocks of a page" to "full recursive tree" with no
+  other change — design that helper behind one interface now. Until then,
+  **author flat** (top-level atomic bullets) so top-level-only indexing is
+  complete; nested bullets are invisible to retrieval.
+- **Full-graph scan cost.** Indexing the whole graph is N `getPage` calls (one
+  per page). Fine at personal-KB scale (hundreds to low-thousands of pages).
+  The planned `getManyBlocks` / `getManyPages` batch-read MCP tools (same
+  roadmap source) would collapse this to a few calls when they ship; until
+  then, N `getPage` calls is the cost.
 
-### Incremental + retraction
+### Incremental + retraction (MCP-only)
 
 - Reindex where `updated_at > embedded_at` (MCP `getPage` returns
   `:block/updated-at`; `remove-hidden-properties` keeps it).
@@ -341,12 +359,20 @@ pull including {:block/page ...} and :block/children>'` run against the host
   sweep to detect retractions** — name the trigger explicitly: a systemd timer /
   cron / launchd job (e.g. hourly incremental + daily full sweep). Incremental
   alone cannot catch retractions.
-- **Retraction detection needs the CLI path.** `:logseq.property/deleted-at` is
-  how recycled blocks are identified (`src/main/logseq/cli/command/search.cljs`
-  walks `{:block/parent …}` to drop them), but MCP `getPage` strips it. So even
-  if indexing uses the MCP path, the retraction sweep must use the CLI `query`
-  pull (with `:logseq.property/deleted-at`) — this is the concrete reason the
-  CLI-over-bridge probe (§3) is a build-order gate, not optional.
+- **Retraction detection works under MCP-only — no CLI needed.** The signal is
+  "UUID no longer returned," and MCP `searchBlocks` is a valid existence probe
+  because it **already filters deleted/recycled blocks out of its results**:
+  its pull selector includes `:logseq.property/deleted-at`
+  (`src/main/frontend/worker/search.cljs:607`) and the search worker applies
+  `(remove hidden-entity?)` where `hidden?` checks `:logseq.property/deleted-at`
+  and walks `:block/parent`
+  (`deps/db/src/logseq/db/frontend/entity_util.cljs:64-66`,
+  `search.cljs:1000`). So a recycled block's UUID disappears from `searchBlocks`
+  results — exactly the "no longer returned" signal the tombstone logic wants.
+  (`getPage` strips `:block/children` but does **not** strip `:block/uuid` or
+  `:block/updated-at`, so per-page existence checks work too.) This corrects an
+  earlier version of the plan that claimed retraction detection required the
+  CLI `query` pull with `:logseq.property/deleted-at` — it doesn't.
 - Model swap: re-embed rows where `model <> ?` (full re-embed — model choice is
   a schema decision; see `vector-logseq.md` §6a).
 
@@ -388,9 +414,11 @@ running `sentence-transformers` with model `all-MiniLM-L6-v2`
   source of truth → native off.
 
 This is a conscious choice, not an oversight: the UUID-keyed join to
-`edges.sqlite` is the deciding factor. Keep the MCP/CLI choice behind one
-interface so a future Logseq MCP upgrade (nested children, property values, a
-UUID-keyed native index) can swap in cheaply.
+`edges.sqlite` is the deciding factor. Keep the read path behind one interface
+(`fetch_block_tree`) so a future Logseq MCP upgrade — `getBlock - include
+children`, `getManyBlocks`/`getManyPages` batch reads, a UUID-keyed native
+index — can swap in cheaply when those ship (roadmap per
+[logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111)).
 
 ### Cross-sidecar freshness watermark
 
@@ -414,48 +442,54 @@ not a wrong answer. (Parallel statement in `code-layer-plan.md` §7.)
 
 ---
 
-## 6. Structured property values — deliberately deferred (by design, not blocked)
+## 6. Structured property values — deliberately deferred
 
 `upsertNodes` sets property _definitions_ and tags, not property _values_ on
-blocks (e.g. `:status`, `:due-date`, `:source-url`) via MCP. **Important:**
-this is an **MCP-path gap, not a hard block.** The CLI `upsert block
---update-properties '{…}'` and `upsert page --update-properties '{…}'` commands
-set property values today
-(`src/main/logseq/cli/command/upsert.cljs:45,55,367-388,399-437` — parses an
-EDN map → `:update-properties` and applies it). That is the **same CLI path the
-plan already relies on for nested reads** (§5 "Indexing source — CLI path"),
-so the bridge exists now.
+blocks (e.g. `:status`, `:due-date`, `:source-url`) via MCP. This is a known
+MCP gap with a named roadmap item: the official MCP server PR
+([logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111)) lists "read
+and writing of properties for any node type" and "anything related to
+namespaces or property values" under "features that will come later." As of
+June 2026 those are **not yet shipped** — `upsertNodes`'s `:data` keys remain
+`:title`/`:page-id`/`:tags`/property-definition fields only.
+
+**Note on the CLI:** the `logseq` CLI _does_ set property values today
+(`upsert block --update-properties '{…}'`,
+`src/main/logseq/cli/command/upsert.cljs:45,55,367-388,399-437`). But the CLI
+is not reachable from the VM (§3 — localhost-only, and a host shim/SSH is
+rejected for isolation + portability), so it is **not a bridge** for this
+plan. Property values are deferred until MCP ships a setter, full stop.
 
 Recommendation: **start with tags + page refs + hierarchy only.** You can't
 design a property schema for knowledge you haven't captured yet; premature
 typed fields ossify into friction. Design the plugin so property-value support
 is a clean slot filled later when **a clear repeated need surfaces in your
-actual notes** — then bridge via CLI `upsert … --update-properties` (never raw
-SQLite). If/when Logseq ships property-value setting in the MCP server, swap the
-bridge to MCP behind the same interface.
+actual notes** — then fill it once Logseq ships an MCP property-value setter
+(never raw SQLite). The deferral is both a design choice (avoid premature
+schema) and a current technical constraint (no MCP setter yet).
 
-**Why this matters for §9:** because property values are reachable via CLI
-today, §9 option-1 (typed edges as Logseq block properties) is **not** dead —
-it's a viable **future migration path** off the `edges.sqlite` sidecar if
-Logseq property-values become first-class and you want the edge graph inside
-the page store instead of a derived index. The chosen path for v1 is still the
-`edges.sqlite` sidecar (§9 option-2), but the reason is "derived index matches
-the gbrain model and keeps Logseq untouched," **not** "properties are
-impossible."
+**Why this matters for §9:** §9 option-1 (typed edges as Logseq block
+properties) is **not chosen for v1** — not because properties are impossible
+in principle, but because (a) the MCP setter isn't shipped yet, and (b) even
+when it ships, co-mingling a derived regex/NER-extracted graph with the
+source-of-truth page store loses the "Logseq never touches files it doesn't
+own" property. It remains a **future migration path** off the `edges.sqlite`
+sidecar if Logseq property-values become first-class via MCP and you want the
+edge graph inside the page store. The chosen path for v1 is the `edges.sqlite`
+sidecar (§9 option-2).
 
 ---
 
 ## 7. Build order
 
 1. **De-risk the network path (host-side).** Rebind MCP server to VM-facing
-   iface; set `allowedHosts`; create token; run the §3 MCP curl probe **and**
-   the §3 CLI-over-bridge probe from the VM. ~15 min. **Stops everything if
-   either doesn't round-trip** — the CLI path is required for retraction
-   detection and nested reads (§5), so it's a gate, not optional. While you
-   have a server up, also run the §8 headless-MCP-surface probe (one `curl
-   tools/call upsertNodes` against a CLI-started server) to determine whether
-   the "always-on agent" fallback is real or aspirational — that result shapes
-   how much abstraction to put behind the MCP/CLI interface now.
+   iface; set `allowedHosts`; create token; run the §3 MCP curl probe from the
+   VM. ~15 min. **Stops everything if this doesn't round-trip** — it's the only
+   host surface the plugin has (CLI is not a fallback, §3; there is no headless
+   MCP server, §8). Confirm the desktop app's MCP server is enabled in Settings
+   → AI and that `tools/call listPages` and `tools/call searchBlocks` both
+   round-trip (the latter validates the keyword leg of hybrid retrieval and the
+   retraction-detection probe).
 2. **Minimal plugin: read + safe write.** `kb_list_pages`, `kb_get_page`,
    `kb_find_notes`, `kb_add_note`, `kb_append_inbox` + dry-run-by-default
    policy. Validate against a throwaway test graph: agent reads, appends, you
@@ -464,36 +498,50 @@ impossible."
 4. **Vector sidecar v1 (MCP-sourced, top-level).** `vectors.sqlite` +
    indexer pulling via `listPages`→`getPage`; `hybrid_search` wired into agent
    retrieval.
-5. **Nested coverage** (move indexer to CLI `query` when needed) and
-   `kb_get_page_tree` via CLI.
-6. **Property values** only when a concrete need appears.
+5. **Nested coverage — blocked on Logseq.** `kb_get_page_tree` and nested
+   block indexing are **not available** until Logseq ships `getBlock - include
+   children` via MCP (planned per
+   [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), not yet
+   implemented as of June 2026). There is no CLI workaround (§3). Until then:
+   author flat (top-level atomic bullets), index top-level only, and keep the
+   `fetch_block_tree` interface ready to upgrade. When `getBlock` ships, this
+   step becomes "swap the backend of `fetch_block_tree` to `getBlock` and
+   reindex" — no plugin rewrite.
+6. **Property values** only when a concrete need appears **and** Logseq ships
+   an MCP property-value setter (same roadmap as `getBlock`).
 
 ---
 
 ## 8. Risks / eyes-open
 
-- **App must be running** for the agent to act (MCP server lives in the desktop
-  process). The previously-stated mitigation — "repoint the plugin at the
-  CLI-started MCP server (headless) by changing one endpoint" — is **unverified
-  and likely wrong as written**: the `logseq server` CLI command
-  (`src/main/logseq/cli/command/server.cljs`) starts a `db-worker-node`, **not**
-  the MCP HTTP server, so it is not a drop-in headless replacement for the
-  desktop MCP endpoint. Whether a CLI-started process exposes the **same MCP
-  tool surface** (incl. `tools/call upsertNodes`) as the desktop app is unknown
-  and must be probed, not assumed. **Probe (fold into build-order step 1):**
-  start whatever CLI server mode exists and issue a `curl … tools/call
-  upsertNodes` with `dry-run: true`; if the tool is present and round-trips,
-  the always-on path is real (keep the MCP/CLI choice behind one interface so
-  the swap is cheap); if not, the "always-on agent" is a deferred dependency on
-  a future Logseq feature, and the plugin should be designed to degrade
-  gracefully when the desktop app is down (queue writes, surface a
-  "Logseq not running" status) rather than assume a headless endpoint exists.
+- **App must be running** for the agent to act (the MCP HTTP server lives in the
+  desktop process — `src/electron/electron/mcp_server.cljs`, gated by the
+  Settings → AI "MCP Server" toggle). There is **no headless MCP server** in the
+  current tree. History: a `logseq mcp-server` CLI command was added Dec 2025
+  (`9d49ba6`) exposing the same tool surface over a configurable `:host`/`:port`,
+  but it was **removed May 28 2026** in the "remove old cli" cleanup
+  (`52398ac7aa`, PR #12739) with no replacement in the new CLI tree
+  (`src/main/logseq/cli/` has no `mcp_server.cljs` and `commands.cljs` has no
+  `mcp` entry). The remaining `logseq server` command starts a `db-worker-node`,
+  **not** an MCP HTTP server. So an earlier draft's "repoint the plugin at a
+  CLI-started headless MCP server by changing one endpoint" is **wrong** — that
+  endpoint no longer exists. Practical consequence: the plugin must be designed
+  to **degrade gracefully when the desktop app is down** (queue writes, surface
+  a "Logseq not running" status) rather than assume a headless endpoint. If
+  headless operation becomes important, the options are: (a) wait for Logseq to
+  re-ship a CLI MCP server (the removal looks like a tree-consolidation side
+  effect, not a policy decision — the desktop server is actively maintained),
+  or (b) run the desktop app headless on the host (Xvfb/Electron headless) so
+  its in-process MCP server is up without a visible GUI. Neither is a plugin
+  concern; keep the MCP endpoint address as the one configurable abstraction.
 - **`allowedHosts` strictness** — if the VM's view of the host changes
   (IP/hostname), the MCP transport rejects until updated. Pin the VM-facing
   hostname.
 - **MCP is page-scoped for reads** — full-graph block scans mean N `getPage`
-  calls (one per page). Fine for personal KB scale; the CLI `query` is the
-  escape hatch for bulk pulls.
+  calls (one per page). Fine for personal KB scale; there is no Datalog escape
+  hatch from the VM (CLI not reachable, §3). The planned `getManyBlocks` /
+  `getManyPages` batch-read MCP tools (same roadmap as `getBlock`) would
+  collapse this when they ship.
 - **No vector sync** — db-sync/RTC never carries the sidecar. If you want RAG
   on multiple machines, replicate `vectors.sqlite` yourself (rsync/git-lfs).
 - **MCP feature gaps may close** — the TODO list (nested children, property
@@ -538,20 +586,21 @@ Logseq has page refs (`[[page]]`) and tags but **no native typed verb edge** —
 gbrain's core moat ("who works at Acme?" queries). Three options:
 
 1. As Logseq properties on blocks (`:works-at` node-type property → Acme).
-   Cleanest in principle. **Not blocked** — the CLI `upsert block
-   --update-properties` path sets property values today (§6, verified at
-   `src/main/logseq/cli/command/upsert.cljs:45,55,367-388`). So this is a
-   **viable future migration path** off the `edges.sqlite` sidecar if Logseq
-   property-values become first-class (e.g. MCP gains a property-value setter)
-   and you want the edge graph inside the page store. **Not chosen for v1**
-   because (a) it co-mingles a derived, regex/NER-extracted graph with the
+   Cleanest in principle. **Not chosen for v1** because (a) the MCP server
+   doesn't yet set property values (§6 — roadmap item, not shipped; the CLI
+   can but the CLI is unreachable from the VM, §3), and (b) even when an MCP
+   setter ships, it co-mingles a derived, regex/NER-extracted graph with the
    source-of-truth page store (loses the "Logseq never touches files it doesn't
-   own" property), and (b) it bakes a verb schema into Logseq properties that's
-   expensive to change once written into real blocks. Revisit after the
-   `edges.sqlite` graph is proven and a stable verb set exists.
+   own" property) and bakes a verb schema into Logseq properties that's
+   expensive to change once written into real blocks. It remains a **viable
+   future migration path** off the `edges.sqlite` sidecar if Logseq
+   property-values become first-class via MCP and you want the edge graph
+   inside the page store. Revisit after the `edges.sqlite` graph is proven and
+   a stable verb set exists.
 2. **As a sidecar `edges.sqlite`** (`from_uuid`, `to_uuid`, `verb`, `context`,
    `source`) populated by the same regex/NER gazetteer gbrain uses, running over
-   block text pulled via CLI `query`. Keyed by the same `:block/uuid`s the
+   block text pulled via **MCP** (`getPage` top-level blocks today; `getBlock`
+   with children when it ships). Keyed by the same `:block/uuid`s the
    vector sidecar uses. ✅ **The chosen call for v1.** It's exactly what gbrain
    does — the typed-edge graph is a _derived index over prose_, same as
    vectors. Keeps it external to the page store (Logseq never touches a file it
@@ -559,15 +608,17 @@ gbrain's core moat ("who works at Acme?" queries). Three options:
    is deterministic and cheaply rebuildable, so the sidecar is an expendable
    build artifact. Lift gbrain's verb set + regex shapes from
    `src/core/extract-ner.ts` and `src/core/schema-pack/link-inference.ts`.
-   Rationale corrected from a prior version: the reason is the separation-of-
-   concerns + rebuildability, **not** "MCP can't set property values" (it can,
-   via CLI — see §6).
+   Rationale: the reason is separation-of-concerns + rebuildability, **not**
+   "properties are impossible" (the MCP setter is just not shipped yet — §6).
 3. As verb-as-tag (`#works-at/acme`). Hacky, loses the to-UUID link. ❌
 
 So: add **one more sidecar** (`edges.sqlite`) + a graph-traversal query layer
-over it. Shares infrastructure with the vector indexer — a "pull full page text"
-helper (CLI `query` with `:block/children`) that both the vector indexer and the
-NER extractor call (already anticipated in phase 5).
+over it. Shares infrastructure with the vector indexer — the same
+`fetch_block_tree` MCP helper (§5) that both the vector indexer and the NER
+extractor call. Today that helper returns top-level blocks per page (so the NER
+extractor sees top-level block text only, same coverage as the vector sidecar);
+when `getBlock - include children` ships, both upgrade to full nested text in
+one swap.
 
 ### What does NOT port / where Logseq is weaker
 

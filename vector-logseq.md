@@ -16,7 +16,7 @@ A design for adding semantic (vector) retrieval over a Logseq DB graph **without
 
 - Logseq's DB graph is a single `db.sqlite` whose content lives in a `kvs` blob table (a serialized datascript DB) plus an FTS5 search index (`blocks` / `blocks_fts`). You cannot sanely add a vector column there — GC, backup/restore, search reindexing, and `PRAGMA user_version` all own those tables.
 - Keep vectors in a **sidecar SQLite file** (`vectors.sqlite`) using the `sqlite-vec` extension, keyed by **block UUID**.
-- Pull block text + UUIDs from Logseq via the `logseq` CLI (`logseq list block` / `logseq query`, `--output json`).
+- Pull block text + UUIDs from Logseq via **MCP** (`listPages` → `getPage` per page; top-level blocks only — nested reads blocked on the planned `getBlock` MCP tool). The `logseq` CLI is **not** used (it is localhost-only and unreachable from the VM; see `kb-architecture-plan.md` §3).
 - Hybrid retrieval = Logseq's built-in FTS5 / datascript queries (keyword) **∪** vector KNN (semantic), merged by UUID.
 
 This keeps Logseq loading cleanly, survives its backup/restore/GC lifecycle, and still gives you a queryable agent knowledge base.
@@ -88,72 +88,78 @@ Notes:
 
 ---
 
-## 3. Pulling blocks from Logseq (CLI)
+## 3. Pulling blocks from Logseq (MCP only)
 
-Two supported paths. Both emit JSON.
+The indexer pulls blocks over **MCP** — the same surface the agent uses. The
+`logseq` CLI is **not used**: it is localhost-only (it spawns/finds a local
+`db-worker-node` on `127.0.0.1` and has no `--host`/`--token` remote-client
+flag), so it cannot run from the VM, and a host-side shim/SSH is rejected for
+isolation + portability. See `kb-architecture-plan.md` §3 for the full
+rationale. Consequences for the indexer:
 
-### 3a. `logseq list block` — simplest
+- **Source = `listPages` → `getPage` per page.** `getPage` returns a page's
+  entity plus its **top-level blocks**, each with `:block/uuid` (string),
+  `:block/title`, `:block/created-at`, `:block/updated-at`. Nested child blocks
+  are stripped (`get-page-data` dissocs `:block/children`). So the indexer
+  covers **top-level blocks only** today.
+- **Nested blocks are not indexed yet.** `getBlock - include children` is a
+  planned MCP tool (per
+  [logseq/logseq#12111](https://github.com/logseq/logseq/pull/12111), not yet
+  shipped as of June 2026). The indexer's `fetch_block_tree` helper (see §4) is
+  the single seam that upgrades from "top-level blocks of a page" to "full
+  recursive tree" when `getBlock` lands — no other change needed. Until then,
+  author flat (top-level atomic bullets) so top-level-only indexing is
+  complete.
+- **Retraction detection does not need `:logseq.property/deleted-at`.** MCP
+  `getPage` strips that attribute, but the indexer doesn't need it: the
+  retraction signal is "UUID no longer returned," and MCP `searchBlocks` is a
+  valid existence probe because it already filters deleted/recycled blocks out
+  of its results (verified: `search.cljs:607` pulls `:logseq.property/deleted-at`
+  and `search.cljs:1000` applies `(remove hidden-entity?)` where `hidden?`
+  checks `deleted-at` and walks `:block/parent`, `entity_util.cljs:64-66`). So a
+  recycled block's UUID disappears from `searchBlocks`/`getPage` results —
+  exactly the "no longer returned" signal the tombstone logic wants.
 
-```bash
-logseq list block --graph my-graph --output json
-```
+Notes on the MCP block shape:
 
-Fields exposed (from `src/main/logseq/cli/command/list.cljs`): `uuid`, `title`, `created-at`, `updated-at`. Page context isn't in the default projection; use 3b if you need it.
-
-### 3b. `logseq query` — arbitrary datascript pull (recommended for indexing)
-
-```bash
-logseq query --graph my-graph --output json --query '[:find [(pull ?b [:block/uuid :block/title :block/created-at :block/updated-at {:block/page [:block/uuid :block/title]}]) ...] :where [?b :block/uuid] [?b :block/title]]'
-```
-
-Notes:
-
-- In **DB graphs**, block text lives in `:block/title` (there is no `:block/content`). Pages also have `:block/name` (lowercased) and `:block/title` (original case).
-- `:block/uuid` is the stable identity — use it as the sidecar primary key.
-- Filter out recycled/deleted blocks by checking `:logseq.property/deleted-at` (see how `search.cljs`'s `search-block-query` walks `{:block/parent ...}` to drop blocks on recycled pages). For a v1 indexer, just skip any entity where `:logseq.property/deleted-at` is non-nil.
-- Verify live flags before relying on them:
-
-  ```bash
-  logseq list block --help
-  logseq query --help
-  logseq example query
-  ```
+- In **DB graphs**, block text lives in `:block/title` (there is no
+  `:block/content`). Pages also have `:block/name` (lowercased) and
+  `:block/title` (original case).
+- `:block/uuid` is the stable identity (`:db.unique/identity`) — use it as the
+  sidecar primary key. MCP stringifies it for you (`tools.cljs` `(update :block/uuid str)`).
 
 ---
 
 ## 4. Minimal indexer (Python)
 
-`vector_logseq.py` — incremental, idempotent, model-aware.
+`vector_logseq.py` — incremental, idempotent, model-aware. Pulls via MCP (a
+thin JSON-RPC client over HTTP to the host endpoint), not the CLI.
 
 ```python
 #!/usr/bin/env python3
 """
-Index a Logseq DB graph into a sqlite-vec sidecar.
+Index a Logseq DB graph into a sqlite-vec sidecar, pulling blocks via MCP.
 
-- Pulls blocks via `logseq query --output json`
+- Pulls top-level blocks via MCP listPages -> getPage (one call per page)
 - Embeds with sentence-transformers (swap _embed() for any provider)
 - Upserts into blocks_meta + block_embeddings
-- Tombstones UUIDs that Logseq no longer returns
+- Tombstones UUIDs the source no longer returns (retraction via absence)
 """
 import json
 import sqlite3
-import subprocess
 import time
 from typing import Iterable
 
 GRAPH = "my-graph"
 SIDECAR = "vectors.sqlite"
 VEC0_EXT = "./vec0"                 # path to sqlite-vec loadable extension
-MODEL = "BAAI/bge-m3"           # default; see §6 for swap procedure
+MODEL = "BAAI/bge-m3"           # default; see §6a for swap procedure
 DIM = 1024
 BATCH = 128
 
-QUERY = """
-[:find [(pull ?b [:block/uuid :block/title :block/created-at :block/updated-at
-                  {:block/page [:block/uuid :block/title]}
-                  :logseq.property/deleted-at]) ...]
-  :where [?b :block/uuid] [?b :block/title]]
-"""
+# MCP HTTP endpoint on the host (kb-architecture-plan.md §3).
+MCP_URL = "http://<host-ip>:12315/mcp"
+MCP_TOKEN = "<TOKEN>"
 
 
 def _connect() -> sqlite3.Connection:
@@ -164,40 +170,83 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _logseq_query(graph: str, query: str) -> list[dict]:
-    out = subprocess.run(
-        ["logseq", "query", "--graph", graph, "--output", "json", "--query", query],
-        check=True, capture_output=True, text=True,
-    )
-    return json.loads(out.stdout)
+class McpClient:
+    """Thin MCP JSON-RPC client. Manages one mcp-session-id."""
+    def __init__(self, url, token):
+        self.url, self.token = url, token
+        self.session_id = None
+        self._id = 0
+
+    def _call(self, method, params=None):
+        import urllib.request
+        self._id += 1
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        body = json.dumps({"jsonrpc": "2.0", "id": self._id,
+                           "method": method, "params": params or {}}).encode()
+        req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req) as resp:
+            self.session_id = resp.headers.get("Mcp-Session-Id") or self.session_id
+            return json.loads(resp.read().decode())
+
+    def initialize(self):
+        return self._call("initialize", {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "vector-logseq-indexer", "version": "0"}})
+
+    def call_tool(self, name, args):
+        r = self._call("tools/call", {"name": name, "arguments": args})
+        # MCP returns content blocks; assume a single JSON text block.
+        content = r.get("result", {}).get("content", [{}])
+        text = content[0].get("text") if content else None
+        return json.loads(text) if text else None
 
 
-def _embed(texts: list[str]) -> list[list[float]]:
+def _fetch_block_tree(mcp, graph):
+    """
+    The single seam for nested reads. Today: top-level blocks per page via
+    getPage. When Logseq ships `getBlock - include children`, swap only this
+    function to return full recursive trees -- the rest of the indexer is
+    unchanged. See kb-architecture-plan.md §5.
+    """
+    pages = mcp.call_tool("listPages", {"expand": True}) or []
+    rows = []
+    for p in pages:
+        page_uuid = p.get(":block/uuid")
+        page_title = p.get(":block/title") or p.get(":block/name")
+        page = mcp.call_tool("getPage", {"pageName": page_uuid or page_title})
+        if not page:
+            continue
+        for b in (page.get(":block/children") or []):  # top-level blocks
+            if b.get(":block/uuid") and b.get(":block/title"):
+                rows.append({**b, ":block/page": {":block/uuid": page_uuid,
+                                                  ":block/title": page_title}})
+    return rows
+
+
+def _embed(texts):
     # Swap for OpenAI, Ollama, local ggml, etc.
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL)
     return model.encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
 
 
-def _uuid_str(v) -> str | None:
-    # datascript uuids serialize as strings in JSON output; be defensive
-    if v is None:
-        return None
-    return str(v)
+def _uuid_str(v):
+    return None if v is None else str(v)
 
 
-def index(conn: sqlite3.Connection, graph: str) -> None:
-    rows = _logseq_query(graph, QUERY)
-    # Drop deleted/recycled
-    rows = [r for r in rows if not r.get(":logseq.property/deleted-at")]
-
+def index(conn, mcp, graph):
+    rows = _fetch_block_tree(mcp, graph)  # MCP already filters deleted blocks
     seen_uuids = set()
     now_ms = int(time.time() * 1000)
 
     for batch in _chunks(rows, BATCH):
         texts = [r[":block/title"] for r in batch]
         vecs = _embed(texts)
-        for r, vec in zip(batch, texts_and_rows := batch, vecs):
+        for r, vec in zip(batch, vecs):
             uuid = _uuid_str(r[":block/uuid"])
             if not uuid:
                 continue
@@ -223,7 +272,8 @@ def index(conn: sqlite3.Connection, graph: str) -> None:
                 "INSERT OR REPLACE INTO block_embeddings(rowid, embedding) VALUES (?, ?)",
                 (rowid, json.dumps(vec)))
 
-    # Tombstone UUIDs Logseq no longer returns
+    # Tombstone UUIDs the source no longer returns (retraction via absence;
+    # searchBlocks/getPage already drop deleted blocks, so absence == retracted).
     if seen_uuids:
         placeholders = ",".join("?" for _ in seen_uuids)
         conn.execute(
@@ -232,19 +282,22 @@ def index(conn: sqlite3.Connection, graph: str) -> None:
     conn.commit()
 
 
-def _chunks(xs: list, n: int) -> Iterable[list]:
+def _chunks(xs, n):
     for i in range(0, len(xs), n):
         yield xs[i:i + n]
 
 
 if __name__ == "__main__":
     c = _connect()
-    index(c, GRAPH)
+    mcp = McpClient(MCP_URL, MCP_TOKEN)
+    mcp.initialize()
+    index(c, mcp, GRAPH)
 ```
 
 ### Incremental mode
 
-`blocks_meta.updated_at` mirrors `:block/updated-at`. To reindex only changed blocks:
+`blocks_meta.updated_at` mirrors `:block/updated-at`. To reindex only changed
+blocks:
 
 ```sql
 SELECT uuid, title FROM blocks_meta
@@ -252,8 +305,12 @@ WHERE graph = ? AND deleted = 0
   AND (updated_at > ? OR embedded_at < ?);
 ```
 
-…then re-query Logseq filtered to those UUIDs, re-embed, upsert. A full sweep (above) is fine for small/medium graphs and is also what you need to detect retractions (tombstoning).
-
+…then re-pull those pages via MCP `getPage`, re-embed, upsert. A full sweep
+(above) is fine for small/medium graphs and is also what you need to detect
+retractions (tombstoning via absence). Note: incremental re-pull is per-page
+(`getPage`), so it's one MCP call per stale page — acceptable at personal scale;
+the planned `getManyBlocks`/`getManyPages` batch-read MCP tools would collapse
+this when they ship
 ---
 
 ## 5. Hybrid retrieval
@@ -334,10 +391,21 @@ score(d) = sum_i  1 / (k + rank_i(d))      # k ~ 60
 - **Page vs block granularity.** Indexing at block granularity maximizes retrieval precision but yields short texts. For page-level context, embed concatenated block titles per page and store with a synthetic `page:<uuid>` key, then fan out to child block UUIDs at query time. Known recall cliff for v1: terse nested bullets (3–8 words) embed poorly; the page-level concat fallback (vector-logseq §6) is the mitigation when top-level coverage under-recalls.
 - **Don't touch `PRAGMA user_version`** on Logseq's `db.sqlite`. If you ever store metadata in the same file (not recommended), use your own version table.
 - **File graphs vs DB graphs.** This design assumes a DB graph (`db.sqlite`). For a legacy file graph, content is Markdown/Org on disk — even easier: walk the directory, embed file/heading chunks, key by file path + heading anchor.
-- **Verify CLI flags live** before scripting around them: `logseq <command> --help` and `logseq example <command>`. The skill policy is explicitly not to hardcode option lists.
+- **Verify the MCP tool surface live** before scripting around it: issue
+  `tools/list` against the host endpoint and confirm `listPages`, `getPage`,
+  `searchBlocks` are present and round-trip. The skill policy is explicitly not
+  to hardcode tool lists — re-check `src/electron/electron/mcp_server.cljs` if a
+  tool's input shape changes.
 - **OPFS / browser caveat.** Logseq's renderer uses OPFS-backed SQLite in the browser. The sidecar is a separate Node/Python process file — keep it out of the graph directory so Logseq's backup/restore can't clobber it. Suggested location: a sibling dir like `~/logseq-vectors/<graph>/vectors.sqlite`.
 - **Cross-sidecar freshness watermark.** There are up to four derived indexes around this KB (KB vectors, KB typed edges in `edges.sqlite`, code chunks+edges, and — if it were enabled — Logseq's native zvec). Each carries its own `embedded_at` / `indexed_at`. The synthesis/query layer treats the **minimum** `embedded_at`/`indexed_at` across the sidecars it joins as the "fresh as of" watermark for any cross-index result, and treats any join across indexes of different freshness as *under-recall to be flagged by gap analysis*, not a wrong answer. See [`code-layer-plan.md`](code-layer-plan.md) §7 for the parallel statement on the code side.
-- **Sweep trigger for retraction detection.** Retractions (blocks deleted via Logseq's recycle bin) are only caught by a **periodic full sweep**, not incrementally. Name the trigger explicitly: a systemd timer / cron / launchd job at a fixed interval (e.g. hourly incremental + daily full sweep) running `vector_logseq.py`. The sweep tombstones UUIDs Logseq no longer returns by checking `:logseq.property/deleted-at` via the CLI `query` pull path (MCP `getPage` strips `:logseq.property/deleted-at`, so retraction detection needs the CLI path even when indexing uses MCP).
+- **Sweep trigger for retraction detection.** Retractions (blocks deleted via
+  Logseq's recycle bin) are only caught by a **periodic full sweep**, not
+  incrementally. Name the trigger explicitly: a systemd timer / cron / launchd
+  job at a fixed interval (e.g. hourly incremental + daily full sweep) running
+  `vector_logseq.py`. The sweep tombstones UUIDs the source no longer returns —
+  and that "no longer returned" signal is valid under MCP-only because
+  `searchBlocks`/`getPage` already filter deleted blocks out of their results
+  (§3). No `:logseq.property/deleted-at` field and no CLI path needed.
 
 ### 6a. Embedding model choice (and why not Logseq's native `all-MiniLM-L6-v2`)
 
@@ -401,7 +469,9 @@ ranking source of truth.
 1. `pip install sqlite-vec sentence-transformers` (or your embedder of choice).
 2. Download `vec0` loadable extension for your platform.
 3. Save the section 2 SQL as `schema.sql`.
-4. Save section 4 as `vector_logseq.py`; set `GRAPH` / `SIDECAR` / `VEC0_EXT`.
+4. Save section 4 as `vector_logseq.py`; set `GRAPH` / `SIDECAR` / `VEC0_EXT`
+   and `MCP_URL` / `MCP_TOKEN` (the host MCP endpoint — see
+   `kb-architecture-plan.md` §3).
 5. Run `python vector_logseq.py` to build the index.
 6. Cron / launchd / systemd timer it for incremental sweeps.
 7. Wire `hybrid_search()` into your agent's retrieval step.
