@@ -356,9 +356,10 @@ Adjustments for the host-DB / VM-agent split:
 - Reindex where `updated_at > embedded_at` (MCP `getPage` returns
   `:block/updated-at`; `remove-hidden-properties` keeps it).
 - Tombstone UUIDs the source no longer returns (`deleted=1`); **periodic full
-  sweep to detect retractions** — name the trigger explicitly: a systemd timer /
-  cron / launchd job (e.g. hourly incremental + daily full sweep). Incremental
-  alone cannot catch retractions.
+  sweep to detect retractions** — run on demand via `kb_reconcile` (Stage 9a)
+  or auto-triggered by the staleness signal, **not on a fixed cron** (the
+  container is intermittently running; a cron that can't fire is worse than an
+  honest staleness signal). Incremental alone cannot catch retractions.
 - **Retraction detection works under MCP-only — no CLI needed.** The signal is
   "UUID no longer returned," and MCP `searchBlocks` is a valid existence probe
   because it **already filters deleted/recycled blocks out of its results**:
@@ -556,7 +557,7 @@ sidecar (§9 option-2).
 with three differentiators that sit on top of a notes+vector store: a synthesis
 layer (cited prose _answers_ + "what the brain doesn't know yet" gap analysis),
 a self-wiring typed-edge graph (`works_at`, `invested_in`, `attended`… extracted
-by regex/NER with zero LLM calls), and an overnight dream cycle (enrich,
+by regex/NER with zero LLM calls), and a dream cycle (enrich,
 extract-facts, consolidate, citation-fix). Most of it ports onto this
 architecture because the synthesis and dream-cycle logic is substrate-agnostic —
 it's agent orchestration that reads/writes through an API. The vector sidecar in
@@ -572,7 +573,7 @@ it's agent orchestration that reads/writes through an API. The vector sidecar in
 | `links` (typed verb edges)                          | **new `edges.sqlite` sidecar — see below**                                                  | ⚠️ the one real lift                            |
 | `page_versions` / `timeline_entries` / `ingest_log` | optional sidecar audit table, or lean on `:block/updated-at`                                | ✅ optional                                     |
 | Synthesis layer (cited answers + gap analysis)      | pure LLM orchestration over `hybrid_search` + graph traversal — **zero storage dependency** | ✅ ports fully, written regardless of substrate |
-| Dream cycle (overnight daemon)                      | external cron/systemd daemon calling MCP + sidecars — **substrate-agnostic**                | ✅ ports fully                                  |
+| Dream cycle (overnight daemon)                      | **on-demand commands** (`kb_reconcile` maintenance + `kb_dream` generation) over one primitive; no built-in scheduler — user adds cron/systemd if wanted | ✅ ports fully (primitive/scheduler split mirrors gbrain's `dream` vs `autopilot`) |
 | MCP server (`gbrain serve`)                         | this plan's Pi plugin over Logseq's MCP endpoint                                            | ✅ already in §4                                |
 
 The headline: **the synthesis layer and the dream cycle — the bulk of gbrain's
@@ -659,12 +660,32 @@ discovered at query time by name; gap analysis absorbs the seams.**
    traversal → cited prose + gap analysis. Substrate-agnostic; gbrain's headline
    feature, "just" agent code. This is also the step that unifies with the code
    layer per [`code-layer-plan.md`](code-layer-plan.md) §10.
-4. **Dream cycle daemon** — cron phases (enrich, extract-facts, consolidate,
-   citation-fix) calling the above + MCP writes. The bulk of gbrain's code,
-   fully portable.
+4. **On-demand reconciliation + generation (not a daemon).** The dream
+cycle ports as **two on-demand commands over one primitive**, not a cron
+daemon — mirroring gbrain's own split (`gbrain dream` one-shot vs
+`gbrain autopilot` scheduler, both calling `runCycle` in
+`src/commands/dream.ts`). The phases split into two buckets:
+   - **`kb_reconcile` (maintenance, LLM-free, idempotent):** `sync`, `embed
+     --stale`, `extract`/`extract_facts`, `orphans`, `purge`, `lint`,
+     `backlinks`. Triggered by the staleness signal; auto-runnable on container
+     start. Replaces the catch-up half of the dream cycle.
+   - **`kb_dream` (generation, LLM-driven, phase-selectable, dry-run-capable):**
+     `synthesize`, `consolidate`, `enrich_thin`, `synthesize_concepts`. Run
+     when you want the brain to reason over accumulated material and write new
+     synthesis/consolidated takes. Replaces the thinking half.
+   - **No built-in scheduler.** The deployment target is an intermittently-
+     running secure container, where a cron that can't fire is worse than an
+     honest staleness signal. Users who want unattended overnight runs add
+     their own cron/systemd one-liner calling the commands. This matches Pi's
+     "ship the primitive, not the deployment" philosophy (same as the MCP
+     decision) and gbrain's primitive/scheduler separation. The staleness
+     signal itself is first-class — every sidecar already carries
+     `embedded_at`/`indexed_at`/`content_hash`; the synthesis layer already
+     takes the min-watermark and flags under-recall. Promote it to a status
+     line + agent context, and use it as the `kb_reconcile` trigger.
 
 The inversion is clean: gbrain is "one Postgres holds everything"; this is
 "Logseq DB holds pages/blocks/tags/refs, sidecars hold vectors + typed-edges +
-audit + code, an external daemon does synthesis + dreams." Better separation —
-and everything that touches Logseq goes through the validated MCP path with
-undo, so the agent can't corrupt the graph.
+audit + code, on-demand commands do synthesis + reconciliation/dreams." Better
+separation — and everything that touches Logseq goes through the validated MCP
+path with undo, so the agent can't corrupt the graph.

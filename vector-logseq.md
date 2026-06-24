@@ -400,12 +400,13 @@ score(d) = sum_i  1 / (k + rank_i(d))      # k ~ 60
 - **Cross-sidecar freshness watermark.** There are up to four derived indexes around this KB (KB vectors, KB typed edges in `edges.sqlite`, code chunks+edges, and — if it were enabled — Logseq's native zvec). Each carries its own `embedded_at` / `indexed_at`. The synthesis/query layer treats the **minimum** `embedded_at`/`indexed_at` across the sidecars it joins as the "fresh as of" watermark for any cross-index result, and treats any join across indexes of different freshness as *under-recall to be flagged by gap analysis*, not a wrong answer. See [`code-layer-plan.md`](code-layer-plan.md) §7 for the parallel statement on the code side.
 - **Sweep trigger for retraction detection.** Retractions (blocks deleted via
   Logseq's recycle bin) are only caught by a **periodic full sweep**, not
-  incrementally. Name the trigger explicitly: a systemd timer / cron / launchd
-  job at a fixed interval (e.g. hourly incremental + daily full sweep) running
-  `vector_logseq.py`. The sweep tombstones UUIDs the source no longer returns —
-  and that "no longer returned" signal is valid under MCP-only because
-  `searchBlocks`/`getPage` already filter deleted blocks out of their results
-  (§3). No `:logseq.property/deleted-at` field and no CLI path needed.
+  incrementally. Run it on demand via `kb_reconcile` (kb-arch Stage 9a) or
+  auto-triggered by the staleness signal — **not on a fixed cron**, because the
+  container is intermittently running and a cron that can't fire is worse than
+  an honest staleness signal. The sweep tombstones UUIDs the source no longer
+  returns — and that "no longer returned" signal is valid under MCP-only
+  because `searchBlocks`/`getPage` already filter deleted blocks out of their
+  results (§3). No `:logseq.property/deleted-at` field and no CLI path needed.
 
 ### 6a. Embedding model choice (and why not Logseq's native `all-MiniLM-L6-v2`)
 
@@ -473,7 +474,11 @@ ranking source of truth.
    and `MCP_URL` / `MCP_TOKEN` (the host MCP endpoint — see
    `kb-architecture-plan.md` §3).
 5. Run `python vector_logseq.py` to build the index.
-6. Cron / launchd / systemd timer it for incremental sweeps.
+6. Run incremental sweeps on demand via `kb_reconcile` (kb-arch Stage 9a), or
+   auto-triggered by the staleness signal — **not on a fixed cron**, because the
+   container is intermittently running. (If you *do* want unattended sweeps,
+   add your own cron/systemd one-liner calling `vector_logseq.py` — that's a
+   deployment choice, not part of the plugin.)
 7. Wire `hybrid_search()` into your agent's retrieval step.
 
 You now have a hybrid notes + agent knowledge base where Logseq remains the editable source of truth and the vector store is a pure, rebuildable derivative — Logseq loads and syncs exactly as before.
