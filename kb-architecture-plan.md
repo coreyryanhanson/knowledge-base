@@ -206,27 +206,51 @@ was previously hand-waved in §4 (`kb_get_page_tree`) and §5 ("Indexing source 
 CLI path"); make it explicit now.
 
 Two viable shapes — pick whichever the CLI actually supports (verify with
-`logseq query --help` / `logseq --help` on the host before committing):
+`logseq query --help` / `logseq --help` on the host before committing). Both
+keep the VM a **pure HTTP/CLI network client with no inbound or shell channel
+to the host** — the whole point of the Firecracker isolation model is that the
+VM must not be able to open an interactive path into the host.
 
-1. **CLI on the VM, pointed at the host.** Confirm the CLI accepts a remote
-   `--host`/`--token` (or `--server-url`) against the desktop app's worker node,
-   i.e. it can be a network client like the MCP path. If yes, the VM runs
-   `logseq query --host <host-ip> --token <TOKEN> …` directly.
-2. **CLI on the host, invoked over the bridge.** If the CLI can only open a
-   local graph (no remote-client mode), run `logseq` **on the host** and invoke
-   it from the VM over SSH / a bridge exec helper: `ssh host logseq query …`.
-   The VM never opens the graph file; the host CLI does.
+1. **CLI on the VM, pointed at the host (preferred).** Confirm the CLI accepts
+   a remote `--host`/`--token` (or `--server-url`) against the desktop app's
+   worker node, i.e. it can be a network client like the MCP path. If yes, the
+   VM runs `logseq query --host <host-ip> --token <TOKEN> …` directly. This is
+   the clean option: same trust model as the MCP path, no host-side glue.
+2. **Host-side CLI-over-HTTP shim (fallback if the CLI has no remote-client
+   mode).** Run a tiny read-only HTTP endpoint **on the host** that wraps
+   `logseq query` — e.g. a small Flask/FastAPI/Express app listening on the VM
+   bridge iface, with Bearer auth, that takes a `query` param, shells out to
+   the local `logseq query --output json`, and returns the JSON. The VM calls
+   it with `curl` (or the plugin's HTTP client). The VM stays a pure HTTP
+   client; it never gets a shell on the host, never opens the graph file, and
+   the shim is scoped to **read-only `query` only** (no `upsert`, no arbitrary
+   command execution). This is strictly less privileged than option 1 and far
+   less privileged than any shell/SSH path.
 
-Probe (run from the VM, covers both shapes):
+**Explicitly rejected: SSH / exec-from-VM-into-host.** Giving the isolated VM
+an interactive shell channel into the host (e.g. `ssh <host> logseq …`) would
+negate the purpose of the Firecracker VM — the blast-radius boundary exists so
+the agent cannot reach the host's execution surface. Any fallback that
+requires the VM to invoke a shell on the host is out of bounds by design, even
+as a "last resort." If neither option 1 nor the read-only HTTP shim works, the
+CLI path is simply unavailable and the plan must fall back to **MCP-only
+coverage** (top-level blocks, no native retraction detection — see §5) until
+Logseq ships nested reads or `:logseq.property/deleted-at` through MCP, rather
+than compromise the isolation boundary.
+
+Probe (run from the VM, covers option 1 first, then option 2 only if needed):
 
 ```bash
-# Shape 1: CLI-as-network-client (preferred if supported)
+# Option 1: CLI-as-network-client (preferred)
 logseq query --host <host-ip> --token <TOKEN> --graph <graph> \
   --output json --query '[:find ?e :where [?e :block/uuid]]' | head -c 200
 
-# Shape 2: host-CLI-over-SSH (fallback)
-ssh <host> 'logseq query --graph <graph> --output json \
-  --query "[:find ?e :where [?e :block/uuid]]"' | head -c 200
+# Option 2 (only if option 1 fails): host-side read-only HTTP shim
+#   (shim itself is a small host process you stand up first; the VM only does this:)
+curl -sS -G http://<host-ip>:<shim-port>/query \
+  -H "Authorization: Bearer <SHIM-TOKEN>" \
+  --data-urlencode 'graph=<graph>' \
+  --data-urlencode 'query=[:find ?e :where [?e :block/uuid]]' | head -c 200
 ```
 
 A JSON array response confirms the CLI path round-trips for nested pulls. Fold
@@ -250,8 +274,10 @@ The plugin is a thin MCP client + KB-shaped tool surface + guardrails. It does
 - `kb_list_tags` / `kb_list_properties` → list tools
 - `kb_get_page_tree` _(plugin-level)_ → recursive walk to rebuild a nested
   tree. Caveat: MCP has no get-children, so this either (a) limits depth to
-  top-level, or (b) shells out to the host `logseq query` CLI over the bridge
-  for a Datalog pull with `:block/children`. Recommend (b) when nesting matters.
+  top-level, or (b) uses the CLI `query` path from §3 (Datalog pull with
+  `:block/children`) — either the CLI-as-network-client option or the host-side
+  read-only HTTP shim, **never** a shell/exec channel from the VM into the
+  host (rejected in §3). Recommend (b) when nesting matters.
 
 ### Write tools (wrap `upsertNodes`, batched, dry-run-first)
 
