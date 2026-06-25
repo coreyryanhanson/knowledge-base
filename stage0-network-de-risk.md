@@ -85,12 +85,58 @@ graph discipline" below.
 **Owner: human.** The agent cannot install/open the Logseq desktop app or drive
 its Settings UI. This section is the user guide.
 
-### 1a. Install and open Logseq (desktop app)
+### 1a. Stand up a Logseq desktop app on the host
 
-Install the Logseq desktop app on the host (AppImage / .deb / .dmg per your
-platform). Open it. The MCP HTTP server lives inside the desktop app — it must
-be running for the rest of Stage 0. There is no headless server to fall back on
-(see "Decision recorded" above).
+The MCP HTTP server lives inside the desktop app — it must be running for the
+rest of Stage 0. There is no headless server to fall back on (see "Decision
+recorded" above). Two ways to get a running desktop app:
+
+- **Packaged app:** install the Logseq desktop app on the host (AppImage /
+  .deb / .dmg per your platform) and open it. Simplest, no toolchain.
+- **Dev build from source (recommended for this project):** run Logseq from the
+  `~/logseq` source tree. The Electron dev app is the desktop app — same GUI,
+  same Settings, same graph storage, same MCP server code path (`:electron`
+  shadow-cljs target: `src/electron/electron/mcp_server.cljs`, `server.cljs`),
+  and gives hot reload for the upstream PR work in
+  [`logseq-getblock-pr-plan.md`](logseq-getblock-pr-plan.md) (which touches
+  `tools.cljs` / `cli.cljs` / `db_core.cljs` / `api.cljs` / `mcp_server.cljs`,
+  all in the live-rebuilt `:electron`/`:app`/`:db-worker` targets). Per
+  [`docs/develop-logseq.md`](../logseq/docs/develop-logseq.md):
+
+  ```bash
+  cd ~/logseq
+  pnpm install && (cd static && pnpm install && cd ..)
+  pnpm watch          # builds :app :db-worker :db-worker-node :electron
+  # in another shell, once watch reports `Build Completed` for :electron and :app:
+  pnpm dev-electron-app
+  ```
+
+  Caveats that apply to the dev path:
+  - **Browser dev ≠ desktop dev.** `pnpm watch` also serves a browser app on
+    `localhost:3001`, but the MCP server is Electron-only — you must use
+    `pnpm dev-electron-app`, not the browser app.
+  - **Single-instance lock.** Close any other Logseq (packaged or dev) before
+    `dev-electron-app` or it fails. Pick one build at a time.
+  - **Dev ≠ release.** Dev mode has different optimizations and a couple of
+    `DEV-RELEASE` code paths; none of them touch MCP transport, auth, or the
+    tool surface, so Stage 0's probes are unaffected.
+  - **Not a daily driver.** Running from source is the right setup for
+    *developing and testing* the PR, not for daily-driving a patched fork
+    long-term — see `logseq-getblock-pr-plan.md` §8. Once the PR is open, go
+    back to stock Logseq + top-level-only + the `fetch_block_tree` seam.
+
+**Baseline-first discipline (important):** whatever build you pick, run Step 1's
+loopback probe against the **unmodified** app first and get all four
+round-trips green before touching `getPage`/`mcp_server.cljs` for the PR. The
+whole point of Stage 0 is to isolate one variable at a time; if you start the
+probe against a build that already has PR edits and it fails, you can't tell
+whether the failure is the bridge/auth or your local Clojure/webpack build. So:
+
+  1. Stand up the app (packaged **or** dev-from-source, your call).
+  2. Get Step 1e's four round-trips green on loopback — your known-good MCP
+     baseline.
+  3. *Then* layer the PR edits on the dev build and re-probe; any new failure
+     localizes to your change.
 
 ### 1b. Create a throwaway test graph
 
