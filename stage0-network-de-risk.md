@@ -213,8 +213,14 @@ without the bridge in the loop.
 ```bash
 TOKEN="<paste token>"
 
-# 1) initialize — validates transport + auth. Expect an mcp-session-id header.
-curl -sS -X POST http://127.0.0.1:12315/mcp \
+# 1) initialize — validates transport + auth. The Mcp-Session-Id response header
+#    is written with the SSE stream's headers, so you MUST use -i (--include) to
+#    see it — bare `curl -sS` prints only the body, never the headers, and the
+#    header is definitely there (the server logs `Initialize sessionId <uuid>`
+#    right after handleRequest at mcp_server.cljs:37). Expect a body like:
+#      event: message
+#      data: {"result":{"protocolVersion":...,"serverInfo":{...}},"jsonrpc":"2.0","id":1}
+curl -sS -i -X POST http://127.0.0.1:12315/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -223,13 +229,24 @@ curl -sS -X POST http://127.0.0.1:12315/mcp \
                  "clientInfo":{"name":"probe","version":"0"}}}'
 ```
 
-Capture the `mcp-session-id` response header; subsequent `tools/call` requests
+Capture the `Mcp-Session-Id` response header; subsequent `tools/call` requests
 should include `Mcp-Session-Id: <that value>` per the MCP spec. (If the server
 accepts stateless `tools/call` without it, fine — but record which behavior you
-see, because `McpClient` in Stage 1 must match it.)
+see, because `McpClient` in Stage 1 must match it.) Or extract it straight into
+a var (one initialize mints one session — don't re-run initialize between
+probes or you'll mint a fresh id and your captured `$SID` won't match the live
+transport):
 
 ```bash
-SID="<session id from step 1>"
+SID=$(curl -sS -i -X POST http://127.0.0.1:12315/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"probe","version":"0"}}}' \
+  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+echo "SID=$SID"
 
 # 2) listPages — validates a graph read. Expect the throwaway graph's pages.
 curl -sS -X POST http://127.0.0.1:12315/mcp \
@@ -374,14 +391,32 @@ gate — it validates the entire network path the plugin will use.
 TOKEN="<token from Step 1d>"
 HOST_EP="http://192.168.100.1:12315/mcp"
 
-# 1) initialize over the bridge — validates transport + auth + firewall + allowedHosts
-curl -sS -X POST "$HOST_EP" \
+# 1) initialize over the bridge — validates transport + auth + firewall + allowedHosts.
+#    Use -i (--include) so the Mcp-Session-Id header is visible (it rides on the
+#    SSE stream's headers; bare `curl -sS` hides it). See Step 1e for the same
+#    gotcha on loopback.
+curl -sS -i -X POST "$HOST_EP" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
        "params":{"protocolVersion":"2025-03-26","capabilities":{},
                  "clientInfo":{"name":"probe","version":"0"}}}'
+```
+
+Or capture the session id straight into a var (don't re-run initialize between
+probes — one initialize mints one session):
+
+```bash
+SID=$(curl -sS -i -X POST "$HOST_EP" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"probe","version":"0"}}}' \
+  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+echo "SID=$SID"
 ```
 
 If `initialize` fails here but succeeded on loopback in Step 1, the failure is
@@ -394,8 +429,6 @@ restarted?), or routing (can the VM reach `192.168.100.1` at all — `ping`/
 loopback success localizes it to the bridge.
 
 ```bash
-SID="<session id>"
-
 # 2) listPages — graph read over the bridge
 curl -sS -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
