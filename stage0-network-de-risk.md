@@ -210,99 +210,55 @@ From the host, run the four round-trips against `127.0.0.1:12315`. These
 validate transport + auth + the read surface + the dry-run write path — all
 without the bridge in the loop.
 
-```bash
-TOKEN="<paste token>"
-
-# 1) initialize — validates transport + auth. The Mcp-Session-Id response header
-#    is written with the SSE stream's headers, so you MUST use -i (--include) to
-#    see it — bare `curl -sS` prints only the body, never the headers, and the
-#    header is definitely there (the server logs `Initialize sessionId <uuid>`
-#    right after handleRequest at mcp_server.cljs:37). Expect a body like:
-#      event: message
-#      data: {"result":{"protocolVersion":...,"serverInfo":{...}},"jsonrpc":"2.0","id":1}
-curl -sS -i -X POST http://127.0.0.1:12315/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
-       "params":{"protocolVersion":"2025-03-26","capabilities":{},
-                 "clientInfo":{"name":"probe","version":"0"}}}'
-```
-
-Capture the `Mcp-Session-Id` response header; subsequent `tools/call` requests
-should include `Mcp-Session-Id: <that value>` per the MCP spec. (If the server
-accepts stateless `tools/call` without it, fine — but record which behavior you
-see, because `McpClient` in Stage 1 must match it.) Or extract it straight into
-a var (one initialize mints one session — don't re-run initialize between
-probes or you'll mint a fresh id and your captured `$SID` won't match the live
-transport):
+The probe lives in a single idempotent script, [`stage0-probe.sh`](stage0-probe.sh)
+(in this repo), so the loopback and bridge runs share one tested implementation.
+Run it on the host:
 
 ```bash
-SID=$(curl -sS -i -X POST http://127.0.0.1:12315/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
-       "params":{"protocolVersion":"2025-03-26","capabilities":{},
-                 "clientInfo":{"name":"probe","version":"0"}}}' \
-  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
-echo "SID=$SID"
+./stage0-probe.sh http://127.0.0.1:12315/mcp "<paste token>"
 ```
 
-**SSE-stream gotcha (read before running the `tools/call` probes):** the
-`Accept: application/json, text/event-stream` header makes the server respond
-with `Content-Type: text/event-stream`, and SSE streams stay open by design —
-the server can push more events later. So a bare `curl -sS` prints the result
-body as it arrives, then **blocks forever** waiting for EOF, looking like it's
-"running something." The result is already in your terminal above the apparent
-hang. Every `tools/call` probe below adds `--max-time 10` to cap that wait:
-the body printed before the cap is the real, valid response; curl exit code 28
-just means "I cut the idle stream off," not "it failed." This doubles as the
-timeout check `McpClient` needs in Stage 1 — if any probe hits 10s with **no**
-body printed, *that's* a real failure worth debugging.
+For a meaningful `upsertNodes` dry-run, grab a page uuid from the `listPages`
+output first and export it:
 
 ```bash
-# 2) listPages — validates a graph read. Expect the throwaway graph's pages.
-#    --max-time 10 caps the SSE stream wait (see the note above); the result
-#    printed before the cap is valid — exit 28 just means "I cut the stream off."
-curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
-       "params":{"name":"listPages","arguments":{}}}'
-
-# 3) searchBlocks — validates the keyword leg (and the retraction-detection probe
-#    leg, which depends on searchBlocks). Expect the block with your distinctive keyword.
-curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"searchBlocks","arguments":{"searchTerm":"stage0probe-kiwi"}}}'
-
-# 4) upsertNodes dry-run — validates the write/dry-run path WITHOUT mutating the
-#    graph. De-risks Stage 1's write surface for free. Expect a planned diff and
-#    NO new block in the Logseq GUI afterward.
-curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
-       "params":{"name":"upsertNodes","arguments":{
-         "dry-run": true,
-         "operations":[{"operation":"add","entityType":"block",
-           "data":{"page-id":"<a page uuid from listPages>","title":"stage0 dry-run block"}}]
-       }}}'
+PAGE_UUID="<a page uuid from the listPages output>" \
+  ./stage0-probe.sh http://127.0.0.1:12315/mcp "<paste token>"
 ```
+
+**What the script does (and why it's written this way):**
+
+- **`initialize` once, reuse the SID.** One `initialize` mints one `Mcp-Session-Id`;
+  the script caches it in `./stage0-sid` and reuses it for every `tools/call`.
+  Re-running `initialize` between probes mints a fresh id that won't match the
+  live transport — and worse, against the current server it **hangs** (see the
+  one-shot-`initialize` bullet in "Risks and fallbacks"). The script avoids
+  both: it only re-initializes when the cached SID is missing or stale, and it
+  `DELETE`s the stale session first to free the server's shared `Protocol` for
+  a fresh `initialize`.
+- **`-i` on `initialize`.** The `Mcp-Session-Id` rides on the SSE response
+  headers; bare `curl -sS` prints only the body and hides it. The server also
+  logs `Initialize sessionId <uuid>` (`mcp_server.cljs:37`) if you need to
+  confirm.
+- **`--max-time 10` on every `tools/call`.** The `Accept: …, text/event-stream`
+  header makes the server respond with `Content-Type: text/event-stream`, and
+  SSE streams stay open by design — a bare `curl -sS` prints the body then
+  **blocks forever** waiting for EOF, looking like a hang. The body printed
+  before the cap is the real, valid response; curl exit code 28 just means "I
+  cut the idle stream off," not failure. If any probe hits 10s with **no** body
+  printed, *that's* a real failure. This cap doubles as the timeout check
+  `McpClient` needs in Stage 1.
+- **`searchBlocks` uses `searchTerm`, not `query`** (the script's `$PROBE_KW`,
+  default `stage0probe-kiwi`); the schema exposes only that field
+  (`mcp_server.cljs:198`). See the `searchBlocks` bullet in "Risks and fallbacks."
 
 **Step 1 exit criteria:** all four round-trips succeed from the host on
 loopback; the dry-run `upsertNodes` returns a planned diff and **no new block
-appears in the Logseq GUI**. If any of these fail, stop and fix the server/token/
-tool — the bridge won't fix them.
+appears in the Logseq GUI**; `searchBlocks` returns a block **with a
+`:block/uuid`** (not `blocks:[]` — an empty result proves the call path but not
+the keyword leg; if it's empty, add a block containing `stage0probe-kiwi` to a
+page and re-run). If any of these fail, stop and fix the server/token/tool —
+the bridge won't fix them.
 
 ---
 
@@ -403,37 +359,20 @@ now against `http://192.168.100.1:12315/mcp` over the bridge. This is the actual
 gate — it validates the entire network path the plugin will use.
 
 ```bash
-# Run from inside the VM (ssh root@172.16.0.2)
+# Run from inside the VM (ssh root@172.16.0.2). Copy stage0-probe.sh onto
+# the VM first (e.g. scp it, or curl it from a host-served path).
 TOKEN="<token from Step 1d>"
 HOST_EP="http://192.168.100.1:12315/mcp"
 
-# 1) initialize over the bridge — validates transport + auth + firewall + allowedHosts.
-#    Use -i (--include) so the Mcp-Session-Id header is visible (it rides on the
-#    SSE stream's headers; bare `curl -sS` hides it). See Step 1e for the same
-#    gotcha on loopback.
-curl -sS -i -X POST "$HOST_EP" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
-       "params":{"protocolVersion":"2025-03-26","capabilities":{},
-                 "clientInfo":{"name":"probe","version":"0"}}}'
+./stage0-probe.sh "$HOST_EP" "$TOKEN"
+# or, with a page uuid for the upsertNodes dry-run:
+# PAGE_UUID="<page uuid from listPages>" ./stage0-probe.sh "$HOST_EP" "$TOKEN"
 ```
 
-Or capture the session id straight into a var (don't re-run initialize between
-probes — one initialize mints one session):
-
-```bash
-SID=$(curl -sS -i -X POST "$HOST_EP" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
-       "params":{"protocolVersion":"2025-03-26","capabilities":{},
-                 "clientInfo":{"name":"probe","version":"0"}}}' \
-  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
-echo "SID=$SID"
-```
+Same script as Step 1e ([`stage0-probe.sh`](stage0-probe.sh)) — the only
+difference is the endpoint. It caches the bridge SID in `./stage0-sid` on the
+VM (keep that separate from the host's `./stage0-sid` so the two sessions
+don't collide; or pass a third arg like `./stage0-probe.sh "$HOST_EP" "$TOKEN" /tmp/stage0-sid-bridge`).
 
 If `initialize` fails here but succeeded on loopback in Step 1, the failure is
 in exactly one of: bind (host = `192.168.100.1` in the Server-config dialog?),
@@ -442,43 +381,13 @@ the VM's `Host` header? remember it's hardcoded, not a list you can append to
 — see Step 2b), firewall (`HOST_SERVICE_PORTS` includes `12315` and VM was
 restarted?), or routing (can the VM reach `192.168.100.1` at all — `ping`/
 `curl -v` to a known good port like `8001`?). Debug in that order — the
-loopback success localizes it to the bridge.
-
-The same SSE-stream gotcha from Step 1e applies here — `tools/call` responses
-arrive as SSE and a bare `curl -sS` blocks forever after printing the body. The
-probes below use `--max-time 10` to cap the wait; exit 28 means "stream cut,"
-not failure.
-
-```bash
-# 2) listPages — graph read over the bridge
-curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
-       "params":{"name":"listPages","arguments":{}}}'
-
-# 3) searchBlocks — keyword leg over the bridge
-curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"searchBlocks","arguments":{"searchTerm":"stage0probe-kiwi"}}}'
-
-# 4) upsertNodes dry-run — write/dry-run path over the bridge, no mutation
-curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SID" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
-       "params":{"name":"upsertNodes","arguments":{
-         "dry-run": true,
-         "operations":[{"operation":"add","entityType":"block",
-           "data":{"page-id":"<page uuid from listPages>","title":"stage0 dry-run block"}}]
-       }}}'
-```
+loopback success localizes it to the bridge. The SSE-stream `--max-time 10`
+behavior is identical to Step 1e (exit 28 = "stream cut," not failure).
 
 **Step 3 exit criteria (the gate):** all four round-trips succeed **from the VM**
 against the throwaway graph; the dry-run `upsertNodes` returns a planned diff and
-no new block appears in the Logseq GUI on the host. Until this passes, do not
+no new block appears in the Logseq GUI on the host; `searchBlocks` returns a
+block **with a `:block/uuid`** (not `blocks:[]`). Until this passes, do not
 start Stage 1.
 
 ---
@@ -533,7 +442,31 @@ duplication. Not worth it.
   Step 1 as pre-rebind-only; re-probe from the VM after Step 2.
 - **`mcp-session-id` behavior.** Record in Step 1 whether `tools/call` requires
   the `Mcp-Session-Id` header or works stateless. `McpClient` (Stage 1) must
-  match the observed behavior — don't assume.
+  match the observed behavior — don’t assume. **Observed in this run:**
+  `tools/call` works with the `Mcp-Session-Id` header captured from
+  `initialize`; the server issues a fresh UUID per `initialize`.
+- **`initialize` is one-shot per server lifetime — re-running the probe script
+  hangs / rejects.** Root cause verified in `mcp_server.cljs:26-40`: the
+  `isInitializeRequest` branch creates a *new* `StreamableHTTPServerTransport`
+  and calls `(.connect mcp-server transport)` — but `mcp-server` is a single
+  shared `Server` (Protocol) instance. The MCP SDK’s `Protocol.connect()`
+  throws `Already connected to a transport. Call close() before connecting to
+  a new transport` if `this._transport` is already set from a prior
+  `initialize` that was never closed. So a second `initialize` (no
+  `Mcp-Session-Id` header) against the same running server fails with an
+  `UnhandledPromiseRejectionWarning` and the curl hangs (the SSE stream never
+  gets a response). Restarting the server clears the in-memory `transports`
+  atom and `_transport`, which is why a restart “fixes” it. **Recovery without
+  restart:** send `DELETE /mcp` with the *old* `Mcp-Session-Id`
+  (`handle-delete-request` at line 60 calls `(.close transport)`, firing
+  `onclose` → `swap! transports dissoc ...` and freeing the server’s
+  `_transport`), then re-`initialize`. **Implications for Stage 1 `McpClient`:**
+  call `initialize` once at bootstrap, cache the SID, and reuse it for all
+  `tools/call`. On reconnect, `DELETE` the old session (if the SID is known)
+  before re-initializing. If the SID is lost (client process restart) and the
+  old session is unknown, only a server restart recovers — a real upstream
+  fragility worth a small companion PR (create a fresh `Server` per session in
+  the initialize branch, matching the MCP SDK’s streamable-HTTP reference).
 - **`searchBlocks` arg is `searchTerm`, not `query` — and `limit` is not a
   parameter.** Verified at `src/electron/electron/mcp_server.cljs:198`:
   `:inputSchema #js {:searchTerm (z/string)}`, the only field.
@@ -543,6 +476,17 @@ duplication. Not worth it.
   validation: `searchTerm` required). Passing `"limit"` is silently dropped
   (or rejected, depending on zod strictness). The Stage 4 indexer must
   truncate the keyword leg client-side after the call.
+- **`searchBlocks` empty result does NOT close the gate for the keyword leg.**
+  In this run `searchBlocks {"searchTerm":"stage0probe-kiwi"}` returned
+  `{"blocks":[],"hasMore?":false,"files":[]}` — the call succeeded (no
+  `-32602`, transport fine) but returned zero hits because the throwaway graph
+  has no block containing `stage0probe-kiwi` yet. That de-risks the *call path*
+  but not the *keyword leg of hybrid retrieval* (Stage 4) or the retraction-
+  detection probe (which needs a UUID that *is* returned to later prove its
+  absence). Before declaring Step 1e green: add a block containing
+  `stage0probe-kiwi` to a page in the throwaway graph, re-run `searchBlocks`,
+  and confirm the block comes back with a `:block/uuid`. Otherwise Stage 4 is
+  building on an unverified read.
 - **Host firewall backend.** `start.sh` uses `firewall-cmd` (Firewalld). If the
   host runs pure `iptables`/`nftables` instead, the `HOST_SERVICE_PORTS` loop's
   `firewall-cmd` call fails silently (`|| true`) and the port won't be opened —
