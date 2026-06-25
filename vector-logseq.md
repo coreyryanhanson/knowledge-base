@@ -350,7 +350,12 @@ def hybrid_search(conn, mcp, graph, query_text, k_sem=10, k_kw=10):
     # --- Keyword: MCP searchBlocks (FTS5 via the search worker) ---
     # `mcp` is a thin MCP JSON-RPC client pointed at the host endpoint (kb-arch §3).
     # searchBlocks returns block hits with :block/uuid, so no id-translation needed.
-    kw_hits = mpc.call("searchBlocks", {"query": query_text, "limit": k_kw})
+    # NOTE: the MCP searchBlocks schema exposes ONLY `searchTerm` (verified in
+    # src/electron/electron/mcp_server.cljs:198 — `:inputSchema #js {:searchTerm
+    # (z/string)}`, and api-search-blocks hardcodes `:enable-snippet? false`).
+    # There is no server-side `limit`; truncate client-side after the call.
+    kw_raw = mpc.call("searchBlocks", {"searchTerm": query_text})
+    kw_hits = kw_raw[:k_kw]
     kw_ranked = []
     for i, h in enumerate(kw_hits):
         uuid = _uuid_str(h.get(":block/uuid"))

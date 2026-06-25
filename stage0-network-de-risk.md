@@ -281,7 +281,7 @@ curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"searchBlocks","arguments":{"query":"stage0probe-kiwi"}}}'
+       "params":{"name":"searchBlocks","arguments":{"searchTerm":"stage0probe-kiwi"}}}'
 
 # 4) upsertNodes dry-run — validates the write/dry-run path WITHOUT mutating the
 #    graph. De-risks Stage 1's write surface for free. Expect a planned diff and
@@ -462,7 +462,7 @@ curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"searchBlocks","arguments":{"query":"stage0probe-kiwi"}}}'
+       "params":{"name":"searchBlocks","arguments":{"searchTerm":"stage0probe-kiwi"}}}'
 
 # 4) upsertNodes dry-run — write/dry-run path over the bridge, no mutation
 curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
@@ -534,6 +534,15 @@ duplication. Not worth it.
 - **`mcp-session-id` behavior.** Record in Step 1 whether `tools/call` requires
   the `Mcp-Session-Id` header or works stateless. `McpClient` (Stage 1) must
   match the observed behavior — don't assume.
+- **`searchBlocks` arg is `searchTerm`, not `query` — and `limit` is not a
+  parameter.** Verified at `src/electron/electron/mcp_server.cljs:198`:
+  `:inputSchema #js {:searchTerm (z/string)}`, the only field.
+  `api-search-blocks` (line 111) calls `logseq.app.search` with
+  `[(aget args "searchTerm") #js {:enable-snippet? false}]` — no `limit`
+  threaded. Passing `{"query": ...}` fails with MCP error `-32602` (input
+  validation: `searchTerm` required). Passing `"limit"` is silently dropped
+  (or rejected, depending on zod strictness). The Stage 4 indexer must
+  truncate the keyword leg client-side after the call.
 - **Host firewall backend.** `start.sh` uses `firewall-cmd` (Firewalld). If the
   host runs pure `iptables`/`nftables` instead, the `HOST_SERVICE_PORTS` loop's
   `firewall-cmd` call fails silently (`|| true`) and the port won't be opened —
