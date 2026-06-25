@@ -247,9 +247,25 @@ SID=$(curl -sS -i -X POST http://127.0.0.1:12315/mcp \
                  "clientInfo":{"name":"probe","version":"0"}}}' \
   | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
 echo "SID=$SID"
+```
 
+**SSE-stream gotcha (read before running the `tools/call` probes):** the
+`Accept: application/json, text/event-stream` header makes the server respond
+with `Content-Type: text/event-stream`, and SSE streams stay open by design —
+the server can push more events later. So a bare `curl -sS` prints the result
+body as it arrives, then **blocks forever** waiting for EOF, looking like it's
+"running something." The result is already in your terminal above the apparent
+hang. Every `tools/call` probe below adds `--max-time 10` to cap that wait:
+the body printed before the cap is the real, valid response; curl exit code 28
+just means "I cut the idle stream off," not "it failed." This doubles as the
+timeout check `McpClient` needs in Stage 1 — if any probe hits 10s with **no**
+body printed, *that's* a real failure worth debugging.
+
+```bash
 # 2) listPages — validates a graph read. Expect the throwaway graph's pages.
-curl -sS -X POST http://127.0.0.1:12315/mcp \
+#    --max-time 10 caps the SSE stream wait (see the note above); the result
+#    printed before the cap is valid — exit 28 just means "I cut the stream off."
+curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -259,7 +275,7 @@ curl -sS -X POST http://127.0.0.1:12315/mcp \
 
 # 3) searchBlocks — validates the keyword leg (and the retraction-detection probe
 #    leg, which depends on searchBlocks). Expect the block with your distinctive keyword.
-curl -sS -X POST http://127.0.0.1:12315/mcp \
+curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -270,7 +286,7 @@ curl -sS -X POST http://127.0.0.1:12315/mcp \
 # 4) upsertNodes dry-run — validates the write/dry-run path WITHOUT mutating the
 #    graph. De-risks Stage 1's write surface for free. Expect a planned diff and
 #    NO new block in the Logseq GUI afterward.
-curl -sS -X POST http://127.0.0.1:12315/mcp \
+curl -sS --max-time 10 -X POST http://127.0.0.1:12315/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -428,23 +444,28 @@ restarted?), or routing (can the VM reach `192.168.100.1` at all — `ping`/
 `curl -v` to a known good port like `8001`?). Debug in that order — the
 loopback success localizes it to the bridge.
 
+The same SSE-stream gotcha from Step 1e applies here — `tools/call` responses
+arrive as SSE and a bare `curl -sS` blocks forever after printing the body. The
+probes below use `--max-time 10` to cap the wait; exit 28 means "stream cut,"
+not failure.
+
 ```bash
 # 2) listPages — graph read over the bridge
-curl -sS -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
+curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
        "params":{"name":"listPages","arguments":{}}}'
 
 # 3) searchBlocks — keyword leg over the bridge
-curl -sS -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
+curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"searchBlocks","arguments":{"query":"stage0probe-kiwi"}}}'
 
 # 4) upsertNodes dry-run — write/dry-run path over the bridge, no mutation
-curl -sS -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
+curl -sS --max-time 10 -X POST "$HOST_EP" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
