@@ -60,9 +60,10 @@ Step 1  Host Logseq + throwaway graph + host-loopback probe      [human-guided]
         └─ exit: four round-trips succeed from the host
 
 Step 2  Expose over the Firecracker bridge                        [agent + human]
-        └─ ~/lab config edit (HOST_SERVICE_PORTS) + Logseq rebind to 0.0.0.0
-           + allowedHosts = the Host header the VM will send + firewall (already
-           wired in start.sh's HOST_SERVICE_PORTS loop)
+        └─ ~/lab config edit (HOST_SERVICE_PORTS) + Logseq rebind host to the
+           bridge IP 192.168.100.1 (allowedHosts is hardcoded to host:port, so
+           the bind host IS the allowedHosts) + firewall (already wired in
+           start.sh's HOST_SERVICE_PORTS loop)
         └─ exit: bridge config applied, VM restarted
 
 Step 3  VM-side round-trip tests (THE GATE)                       [agent-runnable]
@@ -149,23 +150,59 @@ block (e.g. `stage0probe-kiwi`) so the `searchBlocks` round-trip is unambiguous.
 
 ### 1c. Enable the MCP server (Settings → AI)
 
-In Logseq: Settings → AI → enable the MCP HTTP server. At this point keep the
-**defaults**: host `127.0.0.1`, port `12315`, `allowedHosts` = the default
-(`127.0.0.1:12315`). Do **not** rebind to `0.0.0.0` yet — that's Step 2.
-Loopback defaults avoid the DNS-rebinding guard entirely, which is the point of
-doing loopback first.
+In Logseq: Settings → AI → flip the **"Enable MCP server"** toggle on. That's
+the *only* control on that screen — `mcp-server-row` in
+`src/main/frontend/components/settings.cljs:1383` flips just
+`:server/mcp-enabled?` and, as a side effect, silently enables Logseq's older
+"Local HTTP API Server" underneath (`http-server-enabled`), because the MCP
+routes are mounted in the *same* Fastify instance as the `/api` HTTP server
+(`src/electron/electron/server.cljs` `start!` registers both `/api` and `/mcp`,
+and one `api-pre-handler!` hook guards both). So host, port, auth tokens, and
+`allowedHosts` are *all* shared with — and configured alongside — the HTTP API
+server, **not** in Settings → AI. They live behind the header API-icon popup
+(used in 1d and Step 2b).
 
-Verified defaults at `src/electron/electron/server.cljs`
-(`get-host`/`get-port` → `127.0.0.1:12315`) and `src/electron/electron/
-mcp_server.cljs` (`:allowedHosts #js [(str host ":" port)]`,
-`:enableDnsRebindingProtection true`). See `kb-architecture-plan.md` §3.
+Keep the **defaults** for now: host `127.0.0.1`, port `12315`, `allowedHosts` =
+the default (`127.0.0.1:12315`). Do **not** rebind yet — that's Step 2. Loopback
+defaults avoid the DNS-rebinding guard entirely, which is the point of doing
+loopback first.
+
+Defaults and the `allowedHosts` computation are verified at
+`src/electron/electron/server.cljs` (`get-host`/`get-port` → `127.0.0.1:12315`)
+and `src/electron/electron/mcp_server.cljs` (`:allowedHosts #js [(str host ":"
+port)]`, `:enableDnsRebindingProtection true`). **Note:** `allowedHosts` is
+hardcoded to `(str host ":" port)` — there is no UI to add extra entries. This
+breaks the rebind strategy assumed by `kb-architecture-plan.md` §3; see the box
+in Step 2b.
 
 ### 1d. Create a Bearer token
 
-Create a Bearer auth token in the MCP settings. Mandatory once non-loopback
-(Step 2), but create it now so the loopback probe uses the same auth path the
-bridge probe will. Record the token somewhere you can paste it into the probe
-commands; the VM will need it in Step 3.
+The token UI is **not** in Settings → AI — it's in the **HTTP API Server**
+controls, which share auth with MCP (see 1c). Once MCP is enabled (1c flipped
+`http-server-enabled` on), an **API server status icon** (an `api` / `api-off`
+glyph) appears in the header toolbar (`server-indicator` in
+`src/main/frontend/components/server.cljs`, rendered by `header.cljs:476` once
+`feature-http-server-enabled?` is true). Click it → a popup with Start/Stop,
+**Tokens** (key icon), and **Server config** (server-cog icon).
+
+Click **Tokens** → a dialog (`panel-of-tokens`) with token rows (name + value)
+and a regenerate button that fills a `util/unique-id`. Add one row, name it
+e.g. `kb-stage0`, generate/copy its value, and **Save**. Record that value —
+the VM needs it in Step 3.
+
+Two gotchas:
+
+- **Auth is optional until a token exists.** `validate-auth-token`
+  (`server.cljs:83`) is wrapped in `when-let [valid-tokens (cfgs/get-item
+  :server/tokens)]`; if no tokens are stored, the check is skipped and `/mcp`
+  accepts requests with **no** `Authorization` header. So you can sanity-check
+  `initialize` bare before creating a token. Create one anyway so the loopback
+  probe exercises the same auth path the bridge probe will.
+- **Never save an empty token list.** `normalize-tokens` turns `nil` into `[]`
+  in the state atom, and `[]` is truthy in ClojureScript — so opening the
+  Tokens dialog, adding nothing, and hitting Save writes `[]` to config and
+  *every* request (including `/mcp`) starts getting `401 Access Denied!`. Add a
+  real token row before saving.
 
 ### 1e. Host-loopback probe (the protocol de-risk)
 
@@ -270,25 +307,44 @@ already correct and will pick up the new port on the next `start.sh`.
 
 ### 2b. Logseq rebind to the VM-facing interface (human)
 
-In Logseq Settings → AI → MCP server:
+The host/port rebind is **not** in Settings → AI (that screen is only the
+on/off toggle — see 1c). It's in the **header API-icon popup → Server config**
+(server-cog icon) dialog, `panel-of-configs` in
+`src/main/frontend/components/server.cljs`. That dialog edits `:server/host`
+and `:server/port` and triggers a server restart on save.
 
-1. **Rebind the host** from `127.0.0.1` to `0.0.0.0` (all interfaces) — or, more
-   narrowly, to the host's bridge IP `192.168.100.1` if Logseq lets you pick a
-   specific interface. `0.0.0.0` is the simpler, well-trodden choice and matches
-   how `llama.cpp` is exposed to the VM today.
-2. **Set `allowedHosts`** to the **`Host` header the VM will send**. The VM will
-   curl `http://192.168.100.1:12315/mcp`, so its `Host` header is
-   `192.168.100.1:12315`. That exact string must be in `allowedHosts`, or the
-   DNS-rebinding guard rejects the request as an attack. (Verified behavior at
-   `src/electron/electron/mcp_server.cljs` — see `kb-architecture-plan.md` §3.)
-   - Gotcha: once you change `allowedHosts` away from `127.0.0.1:12315`, your
-     Step 1 loopback probe may start getting rejected (its `Host` header is
-     `127.0.0.1:12315`). Either add **both** entries to `allowedHosts`
-     (`127.0.0.1:12315` and `192.168.100.1:12315`) so loopback keeps working, or
-     accept that Step 1 is done before this rebind and re-probe only from the VM.
+> **`allowedHosts` is not configurable — this changes the rebind strategy.**
+> `mcp_server.cljs` hardcodes `:allowedHosts #js [(str host ":" port)]` —
+> always exactly `{configured-host}:{configured-port}`, with no UI or config
+> key to add entries. So the choice of bind host *is* the choice of
+> `allowedHosts`; the VM's `Host` header must equal `{bind-host}:{port}` or the
+> rebinding guard rejects it. This contradicts what earlier drafts (and
+> `kb-architecture-plan.md` §3) assumed about adding the VM's host header to
+> `allowedHosts`.
+
+1. **Rebind the host** — and because of the `allowedHosts` hardcode, **bind to
+   the host's bridge IP `192.168.100.1`, not `0.0.0.0`**. Reason: with bind =
+   `0.0.0.0`, `allowedHosts` becomes `0.0.0.0:12315`, which does **not** match
+   the VM's `Host: 192.168.100.1:12315` header → the rebinding guard rejects
+   every bridge request. Binding to `192.168.100.1` makes `allowedHosts` =
+   `192.168.100.1:12315`, which matches exactly. This is a narrower bind than
+   `0.0.0.0` but it's the only value that satisfies the guard without a code
+   patch. (If `0.0.0.0` is required for some other reason, see the fallback
+   below — it needs a `mcp_server.cljs` patch and is a candidate second
+   upstream PR.)
+2. **`allowedHosts`** — no action; it's derived from the host you just set
+   (see the box above). Verify by probing from the VM in Step 3.
 3. **Token** is already created (Step 1d); no change.
 4. **Host firewall** for the bridge is already handled by `start.sh`'s
    `HOST_SERVICE_PORTS` loop once 2a is applied — no manual `firewall-cmd`.
+
+**Fallback if `0.0.0.0` binding is required:** patch
+`src/electron/electron/mcp_server.cljs` to make `allowedHosts` configurable
+(e.g. read a `:server/mcp-allowed-hosts` config, fall back to `[(str host ":"
+port)]`). ~5 lines. This is a clean, separately-mergeable upstream PR candidate
+("make MCP `allowedHosts` configurable") — keep it out of the
+`getPage-includeChildren` PR so each stays one-capability. Until it lands,
+bind to `192.168.100.1`.
 
 ### 2c. Apply: restart the VM
 
@@ -300,8 +356,9 @@ sudo ./cleanup.sh        # if a VM is running
 sudo ./start.sh <name>   # re-runs the firewall loop with 12315 now included
 ```
 
-**Step 2 exit criteria:** `config.sh` edited; Logseq rebound to `0.0.0.0` with
-`allowedHosts` including `192.168.100.1:12315`; VM restarted and SSH-reachable
+**Step 2 exit criteria:** `config.sh` edited; Logseq host rebound to
+`192.168.100.1` (so the derived `allowedHosts` = `192.168.100.1:12315`,
+matching the VM's `Host` header); VM restarted and SSH-reachable
 (`ssh -i keys/debian-trixie.id_rsa root@172.16.0.2`).
 
 ---
@@ -327,12 +384,14 @@ curl -sS -X POST "$HOST_EP" \
                  "clientInfo":{"name":"probe","version":"0"}}}'
 ```
 
-If `initialize` fails here but succeeded on loopback in Step 1, the failure is in
-exactly one of: bind (`0.0.0.0`?), `allowedHosts` (`192.168.100.1:12315`
-present?), firewall (`HOST_SERVICE_PORTS` includes `12315` and VM was restarted?),
-or routing (can the VM reach `192.168.100.1` at all — `ping`/`curl -v` to a known
-good port like `8001`?). Debug in that order — the loopback success localizes it
-to the bridge.
+If `initialize` fails here but succeeded on loopback in Step 1, the failure is
+in exactly one of: bind (host = `192.168.100.1` in the Server-config dialog?),
+`allowedHosts` (derived from bind host — is it `192.168.100.1:12315`, matching
+the VM's `Host` header? remember it's hardcoded, not a list you can append to
+— see Step 2b), firewall (`HOST_SERVICE_PORTS` includes `12315` and VM was
+restarted?), or routing (can the VM reach `192.168.100.1` at all — `ping`/
+`curl -v` to a known good port like `8001`?). Debug in that order — the
+loopback success localizes it to the bridge.
 
 ```bash
 SID="<session id>"
@@ -405,13 +464,19 @@ duplication. Not worth it.
 ## Risks and fallbacks
 
 - **`allowedHosts` mismatch is the most likely Step 3 failure.** The VM's `Host`
-  header must be in `allowedHosts` *exactly* (`192.168.100.1:12315`, including
+  header must equal `allowedHosts` *exactly* (`192.168.100.1:12315`, including
   the port). If `initialize` returns a rebinding-protection rejection, this is
-  it. Fix: add the exact `host:port` string to `allowedHosts`.
-- **Loopback probe breaks after rebind.** If you want to keep probing from the
-  host after Step 2's rebind, include both `127.0.0.1:12315` and
-  `192.168.100.1:12315` in `allowedHosts`. Otherwise treat Step 1 as
-  pre-rebind-only.
+  it. **The fix is *not* "add the host string to `allowedHosts`" — `allowedHosts`
+  is hardcoded to `[(str host ":" port)]` with no UI.** The fix is to bind the
+  server host to `192.168.100.1` (Step 2b) so the derived `allowedHosts`
+  matches. If you must bind `0.0.0.0`, patch `mcp_server.cljs` (Step 2b
+  fallback).
+- **Loopback probe breaks after rebind — by design, accept it.** Binding host
+  to `192.168.100.1` means the server only listens on that interface, so
+  `127.0.0.1:12315` probes fail at the connection level (not the guard). And
+  since `allowedHosts` is a single derived entry, you can't keep both
+  `127.0.0.1:12315` and `192.168.100.1:12315` working simultaneously. Treat
+  Step 1 as pre-rebind-only; re-probe from the VM after Step 2.
 - **`mcp-session-id` behavior.** Record in Step 1 whether `tools/call` requires
   the `Mcp-Session-Id` header or works stateless. `McpClient` (Stage 1) must
   match the observed behavior — don't assume.

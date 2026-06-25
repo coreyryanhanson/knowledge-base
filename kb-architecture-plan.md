@@ -49,8 +49,9 @@ HOST (your machine — full GUI visibility here)
 ├─ Logseq desktop app            ← you watch/edit here
 │   └─ DB graph: db.sqlite       = single source of truth
 │   └─ MCP HTTP server           = bound to VM-facing iface, Bearer token
-│        default 127.0.0.1:12315 → rebind to 0.0.0.0:<port> (see §3)
-│        allowedHosts must include <vm-facing-host>:<port> (rebinding guard)
+│        default 127.0.0.1:12315 → rebind to the host bridge IP
+│        (e.g. 192.168.100.1:<port>; see §3 — NOT 0.0.0.0)
+│        allowedHosts is hardcoded to {host}:{port} (rebinding guard)
 │
 VM (Firecracker) — agent + retrieval, isolated blast radius
 ├─ Pi agent + KB plugin
@@ -189,15 +190,35 @@ protection, so exposing it to the VM needs explicit config. Verified at
 `127.0.0.1:12315`) and `src/electron/electron/mcp_server.cljs`
 (`:allowedHosts #js [(str host ":" port)]`, `:enableDnsRebindingProtection true`).
 
+**Important correction to earlier drafts:** `allowedHosts` is **hardcoded** to
+`[(str host ":" port)]` in `mcp_server.cljs` — there is no config key or UI to
+add entries. So the bind host you choose _is_ the `allowedHosts` value; the
+VM's `Host` header must equal `{bind-host}:{port}` or the guard rejects the
+request. This means you bind to the **specific bridge IP** (e.g.
+`192.168.100.1`), **not** `0.0.0.0`: a `0.0.0.0` bind makes `allowedHosts` =
+`0.0.0.0:<port>`, which won't match the VM's `Host: 192.168.100.1:<port>` and
+the bridge probe fails. The host/port/token UI lives behind the **header
+API-icon popup** (Tokens + Server config dialogs), not Settings → AI — see
+[`stage0-network-de-risk.md`](stage0-network-de-risk.md) §1c–1d for the exact
+clicks.
+
 Steps:
 
-1. In Logseq, set the HTTP server host to the VM-facing interface
-   (`0.0.0.0` or the host's bridge IP) and pick a port (e.g. keep `12315`).
-2. Set the MCP transport's `allowedHosts` to the **`Host` header the VM will
-   send** — i.e. the host IP/hostname the VM resolves, plus the port:
-   `<vm-facing-host>:<port>`. Mismatch = request rejected as a rebinding attack.
-3. Create a Bearer auth token (MCP server requires it) — mandatory once
-   non-loopback.
+1. In Logseq, set the HTTP server host to the **host's bridge IP**
+   (e.g. `192.168.100.1`) via the header API-icon popup → Server config.
+   **Do not use `0.0.0.0`** — see the correction above. Keep the port
+   (e.g. `12315`).
+2. **`allowedHosts`** — no action needed and no action possible: it's derived
+   as `{host}:{port}` from the host you just set, so binding to `192.168.100.1`
+   makes `allowedHosts` = `192.168.100.1:12315`, which matches the VM's `Host`
+   header exactly. If you ever need a `0.0.0.0` bind plus a distinct allowed
+   host, that requires a `mcp_server.cljs` patch (make `allowedHosts`
+   configurable) — a clean, separately-mergeable upstream PR candidate; keep it
+   out of the `getPage-includeChildren` PR.
+3. Create a Bearer auth token (header API-icon popup → Tokens). Auth is skipped
+   until a token exists, so create one to exercise the real auth path; **do not
+   save an empty token list** (`[]` is truthy in CLJS and will 401 every
+   request).
 4. Open the port on the host firewall for the VM bridge only.
 
 VM-side probe (validates the whole network path before any plugin work):
@@ -483,14 +504,16 @@ sidecar (§9 option-2).
 
 ## 7. Build order
 
-1. **De-risk the network path (host-side).** Rebind MCP server to VM-facing
-   iface; set `allowedHosts`; create token; run the §3 MCP curl probe from the
-   VM. ~15 min. **Stops everything if this doesn't round-trip** — it's the only
-   host surface the plugin has (CLI is not a fallback, §3; there is no headless
-   MCP server, §8). Confirm the desktop app's MCP server is enabled in Settings
-   → AI and that `tools/call listPages` and `tools/call searchBlocks` both
-   round-trip (the latter validates the keyword leg of hybrid retrieval and the
-   retraction-detection probe).
+1. **De-risk the network path (host-side).** Rebind the MCP server host to
+   the host's bridge IP (e.g. `192.168.100.1`) — **not** `0.0.0.0`, because
+   `allowedHosts` is hardcoded to `{host}:{port}` and must match the VM's
+   `Host` header (§3); create a Bearer token; run the §3 MCP curl probe from
+   the VM. ~15 min. **Stops everything if this doesn't round-trip** — it's the
+   only host surface the plugin has (CLI is not a fallback, §3; there is no
+   headless MCP server, §8). Confirm the desktop app's MCP server is enabled in
+   Settings → AI and that `tools/call listPages` and `tools/call searchBlocks`
+   both round-trip (the latter validates the keyword leg of hybrid retrieval
+   and the retraction-detection probe).
 2. **Minimal plugin: read + safe write.** `kb_list_pages`, `kb_get_page`,
    `kb_find_notes`, `kb_add_note`, `kb_append_inbox` + dry-run-by-default
    policy. Validate against a throwaway test graph: agent reads, appends, you
@@ -535,9 +558,15 @@ sidecar (§9 option-2).
   or (b) run the desktop app headless on the host (Xvfb/Electron headless) so
   its in-process MCP server is up without a visible GUI. Neither is a plugin
   concern; keep the MCP endpoint address as the one configurable abstraction.
-- **`allowedHosts` strictness** — if the VM's view of the host changes
-  (IP/hostname), the MCP transport rejects until updated. Pin the VM-facing
-  hostname.
+- **`allowedHosts` is hardcoded, not a list** — `mcp_server.cljs` sets it to
+  `[(str host ":" port)]` with no config key or UI to add entries. So the bind
+  host _is_ the allowed host: bind to the bridge IP (`192.168.100.1`) so the
+  derived `allowedHosts` matches the VM's `Host` header. Do **not** bind
+  `0.0.0.0` (that makes `allowedHosts` = `0.0.0.0:<port>` and the guard rejects
+  the VM's `Host: 192.168.100.1:<port>`). If the VM's view of the host IP ever
+  changes, you must rebind the server host to match — there is no
+  append-an-extra-allowed-host escape hatch without patching `mcp_server.cljs`
+  (a candidate second upstream PR). See §3.
 - **MCP is page-scoped for reads** — full-graph block scans mean N `getPage`
   calls (one per page). Fine for personal KB scale; there is no Datalog escape
   hatch from the VM (CLI not reachable, §3). The planned `getManyBlocks` /
