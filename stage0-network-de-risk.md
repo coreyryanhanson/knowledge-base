@@ -144,9 +144,31 @@ whether the failure is the bridge/auth or your local Clojure/webpack build. So:
 Create a **new, empty DB graph** dedicated to Stage 0. Do **not** point this at
 your real KB — Stage 0 will issue writes (dry-run only, but the path gets
 exercised) and Stages 1–2 will issue real writes. Name it something obvious,
-e.g. `kb-stage0-throwaway`. Add a page or two with a few blocks so `listPages`
-and `searchBlocks` have something to return. Put a distinctive keyword in a
-block (e.g. `stage0probe-kiwi`) so the `searchBlocks` round-trip is unambiguous.
+e.g. `kb-stage0-throwaway`.
+
+Then **manually add, in the Logseq GUI**, the probe block the `searchBlocks`
+round-trip needs. The MCP probe script can only *dry-run* writes — it cannot
+create the block for you — so this is a prerequisite, not something the script
+does. Concretely:
+
+1. Open a page in the throwaway graph (e.g. today's journal). Blur/commit it so
+   it's saved, not still being typed.
+2. Add a block whose content is a distinctive **alphanumeric-only** keyword, e.g.
+   `kiwiprobe77`. (Avoid hyphens/punctuation — `get-match-input`
+   `src/main/frontend/worker/search.cljs:354` phrase-quotes punctuated queries
+   and the trigram path doesn't surface them; `stage0probe-kiwi` was observed to
+   return `blocks:[]` while `kiwiprobe77` returned a hit. See the
+   `searchBlocks` punctuation bullet in "Risks and fallbacks.")
+3. Wait a few seconds for `blocks_fts` to index the new block, then re-run the
+   probe (Step 1e) — `searchBlocks` should return the block with its `uuid`.
+4. **Record the block's `uuid`** from the `searchBlocks` response. Stage 4's
+   retraction-detection probe will delete this block in the GUI and confirm its
+   UUID disappears from later `searchBlocks` results (retraction-by-absence).
+
+Adding a page or two with a few other blocks is fine too, so `listPages` has
+something to return beyond the built-in schema pages, but the one mandatory
+manual step is the `kiwiprobe77` block — without it `searchBlocks` returns
+`blocks:[]` and the keyword leg of the gate is not closed.
 
 ### 1c. Enable the MCP server (Settings → AI)
 
@@ -210,6 +232,14 @@ From the host, run the four round-trips against `127.0.0.1:12315`. These
 validate transport + auth + the read surface + the dry-run write path — all
 without the bridge in the loop.
 
+**Prerequisite (do this first, in the Logseq GUI):** the `searchBlocks` leg
+needs a block to find. The probe script can only *dry-run* writes — it cannot
+create the block for you — so add one manually first, per Step 1b: a block
+whose content is an **alphanumeric-only** keyword like `kiwiprobe77`, on a
+page in the throwaway graph, committed (blur it so it saves). Wait a few
+seconds for `blocks_fts` to index it. Without this, `searchBlocks` returns
+`blocks:[]` and the keyword leg is not de-risked.
+
 The probe lives in a single idempotent script, [`stage0-probe.sh`](stage0-probe.sh)
 (in this repo), so the loopback and bridge runs share one tested implementation.
 Run it on the host:
@@ -249,16 +279,18 @@ PAGE_UUID="<a page uuid from the listPages output>" \
   printed, *that's* a real failure. This cap doubles as the timeout check
   `McpClient` needs in Stage 1.
 - **`searchBlocks` uses `searchTerm`, not `query`** (the script's `$PROBE_KW`,
-  default `stage0probe-kiwi`); the schema exposes only that field
+  default `kiwiprobe77`); the schema exposes only that field
   (`mcp_server.cljs:198`). See the `searchBlocks` bullet in "Risks and fallbacks."
 
 **Step 1 exit criteria:** all four round-trips succeed from the host on
 loopback; the dry-run `upsertNodes` returns a planned diff and **no new block
-appears in the Logseq GUI**; `searchBlocks` returns a block **with a
-`:block/uuid`** (not `blocks:[]` — an empty result proves the call path but not
-the keyword leg; if it's empty, add a block containing `stage0probe-kiwi` to a
-page and re-run). If any of these fail, stop and fix the server/token/tool —
-the bridge won't fix them.
+appears in the Logseq GUI**; `searchBlocks` returns a block **with a `uuid`**
+(not `blocks:[]` — an empty result proves the call path but not the keyword leg;
+if it's empty, add an alphanumeric block per Step 1b and re-run). **Record the
+returned block `uuid`** — Stage 4's retraction-detection probe will delete that
+block in the GUI and confirm its UUID disappears from later `searchBlocks`
+results. If any round-trip fails, stop and fix the server/token/tool — the
+bridge won't fix them.
 
 ---
 
@@ -477,16 +509,30 @@ duplication. Not worth it.
   (or rejected, depending on zod strictness). The Stage 4 indexer must
   truncate the keyword leg client-side after the call.
 - **`searchBlocks` empty result does NOT close the gate for the keyword leg.**
-  In this run `searchBlocks {"searchTerm":"stage0probe-kiwi"}` returned
-  `{"blocks":[],"hasMore?":false,"files":[]}` — the call succeeded (no
-  `-32602`, transport fine) but returned zero hits because the throwaway graph
-  has no block containing `stage0probe-kiwi` yet. That de-risks the *call path*
-  but not the *keyword leg of hybrid retrieval* (Stage 4) or the retraction-
-  detection probe (which needs a UUID that *is* returned to later prove its
-  absence). Before declaring Step 1e green: add a block containing
-  `stage0probe-kiwi` to a page in the throwaway graph, re-run `searchBlocks`,
-  and confirm the block comes back with a `:block/uuid`. Otherwise Stage 4 is
-  building on an unverified read.
+  `searchBlocks` is an FTS5 query over block content (`blocks_fts.title`), so it
+  can only return a hit if a block containing the term already exists. The probe
+  script can only *dry-run* writes — it cannot create the block — so adding the
+  probe block manually in the GUI (Step 1b) is a **prerequisite**, not
+  something the script does. An empty `blocks:[]` proves the call path but not
+  the keyword leg; a hit with a `uuid` proves both.
+- **`searchBlocks` phrase-quotes punctuated terms — use alphanumeric probe
+  keywords.** Verified in this run: `searchTerm:"stage0probe-kiwi"` returned
+  `blocks:[]`, while `searchTerm:"kiwiprobe77"` returned a hit on the same
+  block-shape. Root cause: `get-match-input` (`src/main/frontend/worker/
+  search.cljs:354`) sees the `-` (or any `[^\w\s]` char) and routes the query
+  through `fts-phrase-input`, which wraps it as `"stage0probe-kiwi"*`. The
+  trigram tokenizer doesn't surface that phrase form. **Implication for Stage
+  4:** `kb_find_notes` / hybrid search should normalize or warn on
+  hyphenated/punctuated search terms, or strip punctuation before calling
+  `searchBlocks`. Don't assume arbitrary user queries pass through unmodified.
+- **`searchBlocks` hit field is `uuid`, not `:block/uuid`.** The observed hit
+  shape is `{"uuid":"…","page?":null,"fullTitle":"…","title":"…",
+  "content":"…","id":…,"parent":…,"page":"<page-uuid>"}` — bare keys,
+  not the namespaced `:block/uuid` / `:block/title` that `getPage` returns.
+  Stage 4 code that reads `h.get(":block/uuid")` from `searchBlocks` hits
+  (the earlier draft of `vector-logseq.md` §5 did) will get `None` and silently
+  drop every keyword hit. Read `h["uuid"]` / `h["title"]` / `h["content"]`
+  / `h["page"]` instead. (`vector-logseq.md` §5 has been corrected.)
 - **Host firewall backend.** `start.sh` uses `firewall-cmd` (Firewalld). If the
   host runs pure `iptables`/`nftables` instead, the `HOST_SERVICE_PORTS` loop's
   `firewall-cmd` call fails silently (`|| true`) and the port won't be opened —

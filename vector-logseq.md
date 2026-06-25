@@ -319,8 +319,11 @@ Combine Logseq's keyword recall with vector KNN, then merge by UUID.
 
 > **Corrected path (authoritative: kb-arch §5).** The keyword leg uses **MCP
 > `searchBlocks`**, which routes through `logseq.app.search` → the frontend
-> search worker → `blocks_fts` (a real FTS5 trigram index). It returns
-> `:block/uuid` alongside the hit, so it joins cleanly to the vector sidecar.
+> search worker → `blocks_fts` (a real FTS5 trigram index). Each hit carries a
+> bare `uuid` (the block's `:block/uuid`), so it joins cleanly to the vector
+> sidecar — read `h["uuid"]`, **not** `h[":block/uuid"]` (the observed hit
+> shape uses bare keys, not the namespaced keys `getPage` returns; verified in
+> Stage 0 — see `stage0-network-de-risk.md` "Risks and fallbacks").
 >
 > **Do not** use the CLI `logseq search block` command for the keyword leg. It
 > was previously shown here, but it (a) emits `[:db/id :db/ident :block/title
@@ -349,20 +352,25 @@ def hybrid_search(conn, mcp, graph, query_text, k_sem=10, k_kw=10):
 
     # --- Keyword: MCP searchBlocks (FTS5 via the search worker) ---
     # `mcp` is a thin MCP JSON-RPC client pointed at the host endpoint (kb-arch §3).
-    # searchBlocks returns block hits with :block/uuid, so no id-translation needed.
+    # searchBlocks hit shape uses BARE keys (verified in Stage 0):
+    #   {"uuid":..., "title":..., "content":..., "page":<page-uuid>, ...}
+    # NOT the namespaced :block/uuid / :block/title that getPage returns.
     # NOTE: the MCP searchBlocks schema exposes ONLY `searchTerm` (verified in
     # src/electron/electron/mcp_server.cljs:198 — `:inputSchema #js {:searchTerm
     # (z/string)}`, and api-search-blocks hardcodes `:enable-snippet? false`).
     # There is no server-side `limit`; truncate client-side after the call.
+    # NOTE: get-match-input (worker/search.cljs:354) phrase-quotes punctuated
+    # terms (hyphens etc.) and the trigram path doesn't surface them — strip
+    # punctuation from query_text or warn before calling.
     kw_raw = mpc.call("searchBlocks", {"searchTerm": query_text})
     kw_hits = kw_raw[:k_kw]
     kw_ranked = []
     for i, h in enumerate(kw_hits):
-        uuid = _uuid_str(h.get(":block/uuid"))
+        uuid = _uuid_str(h.get("uuid"))   # bare key, NOT ":block/uuid"
         if not uuid:
             continue
-        kw_ranked.append(dict(uuid=uuid, title=h.get(":block/title", ""),
-                              page=None, dist=None, rank=i))
+        kw_ranked.append(dict(uuid=uuid, title=h.get("title", ""),
+                              page=h.get("page"), dist=None, rank=i))
 
     # --- Merge: Reciprocal Rank Fusion (RRF), k ~ 60 ---
     K = 60

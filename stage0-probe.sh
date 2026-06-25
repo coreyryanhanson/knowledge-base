@@ -10,11 +10,17 @@
 #   session_file  where to cache the Mcp-Session-Id (default: ./stage0-sid)
 #
 # Env overrides:
-#   PROBE_KW      searchBlocks term (default: stage0probe-kiwi). A block
-#                 containing this exact text must exist in the throwaway graph
-#                 for the keyword leg to return a hit (see "Risks and fallbacks"
-#                 in stage0-network-de-risk.md: an empty blocks:[] proves the
-#                 call path but NOT the keyword leg).
+#   PROBE_KW      searchBlocks term (default: kiwiprobe77). A block containing
+#                 this exact text MUST already exist in the throwaway graph for
+#                 the keyword leg to return a hit — the script cannot create it
+#                 (it only does dry-run writes). Add the block manually in the
+#                 Logseq GUI first (see step 1b of stage0-network-de-risk.md).
+#                 Use an ALPHANUMERIC term — hyphens/punctuation are
+#                 phrase-quoted by get-match-input (worker/search.cljs:354) and
+#                 the trigram path doesn't surface them (stage0probe-kiwi was
+#                 observed to return blocks:[] while kiwiprobe77 returned a
+#                 hit). An empty blocks:[] proves the call path but NOT the
+#                 keyword leg.
 #   PAGE_UUID     a real page uuid from listPages, for the upsertNodes dry-run.
 #                 If unset the dry-run still runs with a placeholder page-id and
 #                 may fail validation — set it for a meaningful dry-run.
@@ -33,7 +39,7 @@ set -euo pipefail
 EP="${1:?usage: $0 <endpoint> <token> [session_file]}"
 TOKEN="${2:?token required}"
 SID_FILE="${3:-./stage0-sid}"
-PROBE_KW="${PROBE_KW:-stage0probe-kiwi}"
+PROBE_KW="${PROBE_KW:-kiwiprobe77}"
 PAGE_UUID="${PAGE_UUID:-}"
 MAX_TIME="${MAX_TIME:-10}"
 
@@ -115,9 +121,12 @@ call <<'JSON'
 JSON
 
 echo; echo "== 3) searchBlocks (searchTerm=\"$PROBE_KW\") =="
-echo "   Expects a block containing \"$PROBE_KW\" in the throwaway graph."
-echo "   If blocks:[] comes back, add such a block and re-run — the call path"
-echo "   is proven, but the keyword leg is not until a hit returns with :block/uuid."
+echo "   PREREQUISITE: a block containing \"$PROBE_KW\" must already exist in the"
+echo "   throwaway graph — add it manually in the Logseq GUI first (the script can't"
+echo "   create it; it only does dry-run writes). If blocks:[] comes back, either the"
+echo "   block isn't there yet, the term has punctuation (use alphanumeric only), or"
+echo "   blocks_fts hasn't indexed it yet (wait a few seconds). An empty result"
+echo "   proves the call path but NOT the keyword leg — a hit with a uuid does."
 call <<JSON
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
  "params":{"name":"searchBlocks","arguments":{"searchTerm":"$PROBE_KW"}}}
