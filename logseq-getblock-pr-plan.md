@@ -10,6 +10,12 @@ conversation (scoped against `~/logseq` source). It is **not** the KB's own
 plugin work — that lives in `kb-architecture-plan.md`. This document is only
 about changing Logseq itself.
 
+The PR delivers the **server side** of the `fetch_block_tree` seam contract
+in [`fetch-block-tree-spec.md`](fetch-block-tree-spec.md) (`includeChildren` /
+`depth` / `{:truncated true}` markers / stringified UUID at every level). The
+KB's TS and Python `McpClient` impls conform to the same spec client-side, so
+this PR and the KB's Stage 1 share one written contract.
+
 ---
 
 ## 0. Why this PR, and why now

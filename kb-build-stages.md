@@ -71,11 +71,13 @@ testable. Do it before writing a line of client code.
 graph. ~15 min of config; longer if the VM image doesn't exist yet.
 
 **Decide before exiting Stage 0:** where `McpClient` lives so the plugin tools
-and the sidecar indexers share transport logic. Recommended: a thin
-duplicated-on-purpose client in two places (one inside the Pi extension for
-tools, one in the Python indexer) rather than forcing the indexer to depend on a
-Node extension. The transport is trivial; duplication is cheaper than a
-cross-language dependency.
+and the sidecar indexers share transport logic. **Decision recorded in
+[`stage0-network-de-risk.md`](stage0-network-de-risk.md) Step 4:** two thin,
+duplicated-on-purpose clients grouped by language ecosystem — a TS client
+shared by the Pi extension's `kb_*` tools *and* the Stage 7 code indexer, and a
+Python client shared by the Stage 4 vector + Stage 6 edges indexers — plus a
+shared `fetch_block_tree` seam spec and one shared config file. (The earlier
+"extension (Node) + Python indexer" framing mis-grouped the TS code indexer.)
 
 ---
 

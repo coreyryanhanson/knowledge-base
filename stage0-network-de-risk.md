@@ -442,17 +442,96 @@ start Stage 1.
 Decide before exiting Stage 0 so the Stage 1 plugin tools and the Stage 4/6/7
 sidecar indexers share transport logic by design, not by accident.
 
-**Recommended: a thin, duplicated-on-purpose client in two places** — one inside
-the Pi extension (Node, for the `kb_*` tools) and one in the Python indexer
-(for the vector/edges/code sidecars). The transport is trivial (JSON-RPC
-envelope + Bearer header + `mcp-session-id` + reconnect/timeout); duplicating it
-across two languages is cheaper than forcing the Python indexer to depend on a
-Node extension or vice versa. Both copies are validated against the same
-endpoint Stage 0 just proved.
+**Decision (locked): two thin, duplicated-on-purpose `McpClient`
+implementations, grouped by language ecosystem — NOT "extension vs. all
+indexers."** The earlier draft of this section said "Node (extension) + Python
+(indexers)," but that mis-grouped the code-layer indexer: per
+[`code-layer-plan.md`](code-layer-plan.md) §3a/§9 the Stage 7 code indexer is
+TypeScript (`chunkers/code.ts`, gbrain-style Bun, "the agent runs on code like
+this repo"), while the Stage 4 vector indexer and the Stage 6 typed-edges
+extractor are Python and share `fetch_block_tree`
+([`kb-architecture-plan.md`](kb-architecture-plan.md) §6). So the real split is:
 
-The alternative — one shared client in a language-agnostic service the others
-call — adds a third process and a new failure mode, for ~40 lines of saved
-duplication. Not worth it.
+- **TS `McpClient`** — shared by the Pi extension's `kb_*` tools **and** the
+  code-layer indexer (Stage 7). One impl, two consumers in the same language
+  ecosystem.
+- **Python `McpClient`** — shared by the vector sidecar indexer (Stage 4) and
+  the typed-edges extractor (Stage 6). One impl, two consumers.
+
+Two impls, no third. The transport is trivial (JSON-RPC envelope + Bearer
+header + `mcp-session-id` + reconnect/timeout); duplicating it across two
+languages is cheaper than forcing the Python indexers to depend on a TS client
+or vice versa, and cheaper than rewriting the Python indexers in TS. Both
+impls are validated against the same endpoint Stage 0 just proved.
+
+The rejected alternative — one shared client in a language-agnostic service the
+others call — adds a third process and a new failure mode, for ~40 lines of
+saved duplication. Not worth it.
+
+### 4a. Process topology (locked)
+
+Three long-lived processes hold an MCP session (each = one `initialize` + one
+SID, and each must handle the one-shot-`initialize` / `DELETE`-before-reconnect
+fragility recorded in "Risks and fallbacks" below):
+
+1. **Pi extension** (TS) — `kb_*` tools; one TS `McpClient`, one session.
+2. **Python indexer** (Python) — vector + edges in **one process** (they share
+   `fetch_block_tree` and the block-pull path anyway); one Python `McpClient`,
+   one session.
+3. **Code indexer** (TS) — its own process; reuses the **same TS `McpClient`
+   impl** as the extension (library, not a second copy), its own session.
+
+~3 sessions total. Vector and edges are co-located (cohesion > isolation, since
+they read the same blocks); the code indexer is separate from the extension
+(isolation > coupling, so code indexing doesn't depend on extension uptime).
+Rejected: one-process-per-sidecar (~4 sessions, more bootstrap duplication) and
+running the code indexer in-process inside the extension (~2 sessions, but
+couples code indexing to extension uptime).
+
+### 4b. `fetch_block_tree` seam contract (locked)
+
+**Written:** [`fetch-block-tree-spec.md`](fetch-block-tree-spec.md) (standalone,
+in this repo). Both the TS and Python `McpClient` impls conform to it, and the
+upstream PR ([`logseq-getblock-pr-plan.md`](logseq-getblock-pr-plan.md))
+delivers the server side of the same contract. Summary of what the spec fixes
+(matching the PR plan §3a/§4):
+
+- Method signature: `fetch_block_tree(page, opts?)` where `opts =
+  {includeChildren?: bool, depth?: int}`.
+- Default `depth = 50`, hard cap `100`; nodes past `depth` carry
+  `{:block/children {:truncated true}}` instead of their children.
+- Return shape: a list of block nodes, each with stringified `:block/uuid`
+  (the normalizer must stringify at **every** level, not just top-level — a
+  real correctness fix the PR delivers).
+- Today's behavior (no `includeChildren`) returns top-level only, no
+  `:block/children` — backwards compatible, the default both impls ship with.
+- Missing page raises `PageNotFound` (not `[]`); `depth` out of range raises
+  `InvalidDepth`; pre-PR `includeChildren=true` returns top-level only with an
+  `_truncated` flag (honest signal that Stage 5 is pending upstream).
+
+Both impls are unit-tested against the spec (tests 1–4 now, test 5 skipped
+until the capability lands), so the upstream swap is identical on both sides
+and drift is caught at test time, not at query time.
+
+### 4c. Config source (locked)
+
+**One shared config file** read by every consumer (the extension, the Python
+indexer, the code indexer) — e.g. `~/.config/kb/mcp.json` or an env file —
+carrying `endpoint` (`http://192.168.100.1:12315/mcp`), `token`, and `graph`.
+One place to rotate the token; no risk of the extension and the indexers
+pointing at different endpoints. Rejected: extension-settings-as-source-of-
+truth (introduces a sync step that drifts) and per-process env vars (re-set the
+token in N places on rotation).
+
+### Step 4 exit criteria
+
+The four decisions above are recorded here, and the `fetch_block_tree` spec is
+written as a standalone file in this repo
+([`fetch-block-tree-spec.md`](fetch-block-tree-spec.md) — done). Stage 1 may now
+start coding either `McpClient` against the spec and the shared config; the
+upstream PR track ([`logseq-getblock-pr-plan.md`](logseq-getblock-pr-plan.md))
+may start in parallel immediately — it shares the spec as its server-side
+contract and has no dependency on Stage 1.
 
 ---
 
