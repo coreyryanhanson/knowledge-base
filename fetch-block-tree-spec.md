@@ -45,9 +45,9 @@ fetch_block_tree(page, opts?) -> BlockNode[]
 - `opts` (optional, all fields optional):
   - `includeChildren`: `bool`, default `false`. When `false`, returns
     top-level blocks only (today's behavior). When `true`, returns the full
-    recursive tree, subject to `depth` and the node cap.
+    recursive tree, subject to `depth`.
   - `depth`: `int`, default `50`, hard cap `100`. Max nesting depth to return.
-    Nodes at depth > `depth` carry `{:block/children {:truncated true}}`
+    Nodes at depth > `depth` carry `:block/children [{:truncated true}]`
     instead of their children. `depth=0` is invalid (rejected); `depth=1`
     means top-level only.
 - Returns: a list of `BlockNode` (see §3), one per top-level block of the
@@ -114,20 +114,14 @@ When `includeChildren=true`:
 - Recurse to `depth` levels (default 50, cap 100). `depth=1` = top-level
   only (same as `includeChildren=false`).
 - A node at the depth boundary carries
-  `":block/children": {":truncated": true}` — a **marker object**, not an
-  array. Consumers MUST check `Array.isArray(children)` (TS) /
-  `isinstance(children, list)` (Python) before iterating; a non-array
-  children value means "more exists, not fetched."
-- **Max-node cap: 5000** nodes total across the returned tree (matches the
-  PR's payload-size discipline, `logseq-getblock-pr-plan.md` §4). If
-  exceeded, the impl truncates at the cap and the **root call** returns a
-  top-level metadata flag `{"_truncated": true, "_node_count": 5000}`
-  alongside the tree (returned as a separate field on the result object —
-  see §6 — not injected into a BlockNode). This is the client's safety net
-  for the case the server cap isn't yet implemented; after the PR ships the
-  server's own cap, the client cap is redundant but harmless.
+  `":block/children": [{":truncated": true}]` — a **one-element vector**
+  (a marker element inside the children vector), so `:block/children`
+  stays a collection at every node, matching `blocks->vec-tree`'s
+  invariant. Consumers iterate as usual; a marker element with
+  `:truncated` means "more exists, not fetched."
 
-The truncated-marker shape is identical server-side and client-side so a
+`depth` is the only payload bound — there is no node-count cap. The
+truncated-marker shape is identical server-side and client-side so a
 consumer can't tell (and doesn't care) which side truncated.
 
 ---
@@ -148,19 +142,12 @@ consumer can't tell (and doesn't care) which side truncated.
 
 ---
 
-## 6. Return container
+## 6. Return shape
 
-`fetch_block_tree` returns `BlockNode[]` directly for the common case. When
-truncation occurred (§4 cap hit), it instead returns:
-
-```
-{ "nodes": BlockNode[], "_truncated": true, "_node_count": int }
-```
-
-Consumers SHOULD check `Array.isArray(result)` (TS) / `isinstance(result, list)`
-(Python) first; if it's an object/dict, read `result["nodes"]` and inspect
-`_truncated`. This keeps the happy path (a plain array) zero-ceremony while
-making truncation impossible to silently ignore.
+`fetch_block_tree` returns `BlockNode[]`. Truncation is signaled in-tree:
+nodes at the depth boundary carry `:block/children [{:truncated true}]`
+(§4), so consumers iterate the array as usual and check for a `:truncated`
+marker element. There is no separate container object or node-count field.
 
 ---
 
@@ -175,9 +162,8 @@ Both the TS and Python `McpClient.fetch_block_tree` do the same thing today:
 3. Run the §3 normalizer over that list (stringify UUIDs, drop titleless
    nodes, back-fill `:block/page`).
 4. If `includeChildren` was requested, the result is **still top-level
-   only** today — set `{"_truncated": true, "_node_count": <count>}` on the
-   container (§6) so consumers know nested coverage isn't available yet.
-   This is the honest signal that Stage 5 is pending upstream.
+   only** today — the client does not synthesize nested data. This is the
+   honest pre-PR behavior; §8 describes the post-PR swap (backend-only).
 5. Return per §6.
 
 No client-side recursion is attempted today (there's nothing to recurse
@@ -195,8 +181,8 @@ The client:
 
 1. Same `call_tool` (now the server honors the two fields).
 2. Walk the returned tree, run the §3 normalizer as a **safety net** (no-op
-   if the server already normalized — cheap), enforce the §4 depth/client
-   cap, emit `{:truncated true}` markers at the boundary.
+   if the server already normalized — cheap), enforce the §4 depth bound,
+   emit `[{:truncated true}]` markers at the boundary.
 3. Return per §6.
 
 No consumer changes. No indexer changes. No plugin rewrite. This is the
@@ -215,12 +201,12 @@ graph from Stage 0:
    Stage 4 indexer's only mode until Stage 5.)
 2. **Missing page raises `PageNotFound`**, not `[]`.
 3. **`depth` validation:** `depth=0` and `depth=101` raise `InvalidDepth`.
-4. **`includeChildren=true` today** returns top-level only with
-   `{"_truncated": true}` on the container (§7 step 4) — documents the
-   pre-Stage-5 honest signal.
+4. **`includeChildren=true` today** returns top-level only (the server
+   does not yet return nested data) — documents the pre-PR honest
+   behavior (§7 step 4).
 5. **Post-PR (skip until the capability lands):** a page with ≥3 levels of
    nesting returns a full tree; `depth=2` truncates at level 2 with
-   `{:truncated true}` markers; `:block/uuid` is a string at every level.
+   `[{:truncated true}]` markers; `:block/uuid` is a string at every level.
 
 Tests 1–4 are written **now**, against today's server. Test 5 is written as
 a `skip`/`xit`/`pytest.mark.skip` and un-skipped the day the PR's capability
@@ -234,7 +220,7 @@ is in the running server.
   plan.md) §4 (`kb_get_page_tree`), §5 (vector indexer uses it), §6 (edges
   extractor uses it).
 - Server-side implementation (the PR): [`logseq-getblock-pr-plan.md`](logseq-
-  getblock-pr-plan.md) §3 (file-by-file), §4 (depth/cap reviewer risk).
+  getblock-pr-plan.md) §3 (file-by-file), §4 (depth bound).
 - Client location decision: [`stage0-network-de-risk.md`](stage0-network-de-
   risk.md) Step 4 (two impls grouped by language; this spec is shared).
 - Observed MCP shapes that constrain this spec (Stage 0 findings):

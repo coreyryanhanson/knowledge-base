@@ -10,6 +10,12 @@ conversation (scoped against `~/logseq` source). It is **not** the KB's own
 plugin work — that lives in `kb-architecture-plan.md`. This document is only
 about changing Logseq itself.
 
+**Operational handoff:** [`pr-handoff-getpage-include-children.md`](pr-
+handoff-getpage-include-children.md) — repo layout, the VM/host sync+build+
+probe loop, submission mechanics, and a condensed edit checklist. Read that
+first when starting a fresh chat in `/root/logseq`; this doc is the *what/why*,
+that doc is the *how to drive it*.
+
 The PR delivers the **server side** of the `fetch_block_tree` seam contract
 in [`fetch-block-tree-spec.md`](fetch-block-tree-spec.md) (`includeChildren` /
 `depth` / `{:truncated true}` markers / stringified UUID at every level). The
@@ -96,7 +102,7 @@ separate tool (ask in the PR description upfront).
 2. **Depth cap.** `blocks->vec-tree` recurses with **no depth or count cap**
    (`tree.cljs:11`). Add a `depth` parameter (default `50`, hard cap `100`): stop
    recursing past N levels; truncated nodes get a marker like
-   `{:block/children {:truncated true}}` instead of their children. ~3 lines in
+   `:block/children [{:truncated true}]` instead of their children. ~3 lines in
    the normalizer walk.
 3. **`get-page-data` (line 79):** accept an `opts` map `{includeChildren?,
    depth?}`. Replace the unconditional `(dissoc :block/children :block/page)`
@@ -140,13 +146,10 @@ the single most likely reason for a slow/no merge. **Ship the PR with these
 already designed and tested, not as a follow-up:**
 
 - **`depth` parameter** (default `50`, hard cap `100`): stop recursing past N
-  levels; truncated nodes carry `{:block/children {:truncated true}}`. 3-line
-  change in the normalizer walk.
-- **Max-node cap** (e.g. `5000` nodes total across the tree): if exceeded, return
-  an error or a truncated top-level slice rather than the whole page. The
-  existing `list-pages` comment at `tools.cljs` ("return minimal info to avoid
-  exceeding max payload size") shows maintainers already think about payload
-  size — cite that comment in the PR description as precedent.
+  levels; truncated nodes carry `:block/children [{:truncated true}]` (a
+  one-element vector, so `:block/children` stays a collection). Small
+  change in the normalizer walk. `depth` is the only payload bound — no
+  node-count cap.
 - **Test** that a deep page returns `truncated` markers and respects `depth`.
 - **Explicitly state** in the PR description that this is read-only, so no
   dry-run/auth-surface change is needed — head off that question.
@@ -190,9 +193,9 @@ building pages/blocks.
   optional. The `includeChildren` flag mirrors the existing `get_block` SDK API
   (`api/block.cljs`)."
 - **Pre-empt security/size:** "Read-only, no auth/dry-run surface change.
-  Includes `depth` (default 50, cap 100) and a max-node cap with `truncated`
-  markers; tests cover both. Payload-size discipline matches the existing
-  `listPages` approach (`tools.cljs` comment)."
+  Includes `depth` (default 50, cap 100) with `[{:truncated true}]`
+  truncation markers; tests cover depth and the default-unchanged path.
+  `depth` is the only payload bound — no node-count cap."
 - **Keep scope tight:** one PR for `getPage - include children` **only**.
   `getManyBlocks` / `getManyPages` / the property-value setter = separate
   follow-up PRs. Say this explicitly so reviewers don't try to bundle.

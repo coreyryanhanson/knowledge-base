@@ -191,8 +191,9 @@ upstream" caveat.
 
 - **Parallel track (start now, non-blocking):** the upstream PR per
   [`logseq-getblock-pr-plan.md`](logseq-getblock-pr-plan.md). Implement
-  `getPage - includeChildren` with `depth` cap (default 50, cap 100) + max-node
-  cap + `truncated` markers + tests. Open the PR; keep scope to one capability.
+  `getPage - includeChildren` with `depth` cap (default 50, cap 100) +
+  `[{:truncated true}]` markers + tests. `depth` is the only payload bound (no
+  node-count cap). Open the PR; keep scope to one capability.
   Do **not** daily-drive a patched fork — it's host glue with extra steps.
 - **When the capability lands** (upstream merge + release, or last-resort fork):
   swap the backend of `fetch_block_tree` to `getBlock`, add `kb_get_page_tree`

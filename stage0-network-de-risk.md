@@ -499,15 +499,15 @@ delivers the server side of the same contract. Summary of what the spec fixes
 - Method signature: `fetch_block_tree(page, opts?)` where `opts =
   {includeChildren?: bool, depth?: int}`.
 - Default `depth = 50`, hard cap `100`; nodes past `depth` carry
-  `{:block/children {:truncated true}}` instead of their children.
+  `:block/children [{:truncated true}]` instead of their children.
 - Return shape: a list of block nodes, each with stringified `:block/uuid`
   (the normalizer must stringify at **every** level, not just top-level — a
   real correctness fix the PR delivers).
 - Today's behavior (no `includeChildren`) returns top-level only, no
   `:block/children` — backwards compatible, the default both impls ship with.
 - Missing page raises `PageNotFound` (not `[]`); `depth` out of range raises
-  `InvalidDepth`; pre-PR `includeChildren=true` returns top-level only with an
-  `_truncated` flag (honest signal that Stage 5 is pending upstream).
+  `InvalidDepth`; pre-PR `includeChildren=true` returns top-level only (the
+  server does not yet return nested data — no synthesized flag).
 
 Both impls are unit-tested against the spec (tests 1–4 now, test 5 skipped
 until the capability lands), so the upstream swap is identical on both sides
