@@ -4,8 +4,8 @@ A pi extension that builds and maintains a knowledge base in SiYuan, modeled on 
 methods but re-grounded: **pi as the harness, SiYuan as the storage engine, zero model/provider
 opinions.**
 
-Status: planning complete, implementation not started. This document is the successor to
-DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
+Status: design complete — Milestone 0 (connectivity/auth smoke test, §11) is done, implementation
+starts at Milestone 1. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
 revisions agreed in design review (recorded in DESIGN-REVISIONS.md, decision records R1–R6).
 Provenance: decisions reached via a Socratic design interview plus adversarial review against
 GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan @ 3.8.2; the
@@ -173,16 +173,16 @@ Curated pi tools (one set, not per-KB):
    every block row), so every discovery row carries the docId that `read` and the write
    modes consume plus its per-row KB attribution (doctrine, §4).
 2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Echo contract (decision record)**:
-every row echoes the full doc address — `id` (the matched block, kernel `id`),
-**`root_id`** (kernel `rootID` — a doc's root block ID *is* the `docId` `read` consumes),
-`hpath`, and `box` mapped back to its resolved **KB name per row** (the extension built
-the name→box map for `paths` itself, so the reverse mapping is free), making a multi-KB
-search result self-describing — the same property the query envelope already has. Search
-is the discovery step: a hit is directly consumable as `read { kb, docId: root_id }`
-with no intermediate box→name resolution hop, so the `search → read` recall loop (§4)
-never dead-ends on attribution. (Kernel shape verified at 3.8.2: the route returns
-`[]*Block` whose JSON carries `box`, `rootID`, `hPath`, `id` per hit —
-`model/block.go:44-48`.)
+  every row echoes the full doc address — `id` (the matched block, kernel `id`),
+  **`root_id`** (kernel `rootID` — a doc's root block ID *is* the `docId` `read` consumes),
+  `hpath`, and `box` mapped back to its resolved **KB name per row** (the extension built
+  the name→box map for `paths` itself, so the reverse mapping is free), making a multi-KB
+  search result self-describing — the same property the query envelope already has. Search
+  is the discovery step: a hit is directly consumable as `read { kb, docId: root_id }`
+  with no intermediate box→name resolution hop, so the `search → read` recall loop (§4)
+  never dead-ends on attribution. (Kernel shape verified at 3.8.2: the route returns
+  `[]*Block` whose JSON carries `box`, `rootID`, `hPath`, `id` per hit —
+  `model/block.go:44-48`.)
 3. **read** — fetch a doc as GFM markdown via `exportMdContent`. `getDoc` (DOM output) is
    never used — the block-ID outline and spill design presuppose GFM. **Addressing
    (decision record, R2; full record §4): `read` takes `kb` (one name) + `docId`** — an
@@ -351,7 +351,7 @@ deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and
   carries the fresh outline, so a post-write `read` is never needed just to regain
   valid targets and anchors.
 - Where the policy lives: the inline limit and spill mechanism are extension-owned (one
-  shared helper, three constants — `SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`); `siyuan-core` stays policy-free — its query method takes
+  shared helper, the three constants above); `siyuan-core` stays policy-free — its query method takes
   `stmt` + `mode`, its search method takes an explicit `limit` parameter, and its read
   method takes only the doc `id` (§3 owns the entire read budget via preview + spill).
 
@@ -770,10 +770,9 @@ every follow-up read/write/move; title and hpath are display only, not an addres
 - **`newBlockId`** — the inserted block's ID (insert/append/replace-section modes), the
   kernel call's return value; it is the ready target for a follow-up `edit` without a
   `query` round-trip. **Verified, not trusted** (stale-target decision record, above):
-  the tool asserts `newBlockId` appears in the unfiltered post-write block tree fetched
-  with the outline (the same `getChildBlocks` call) — the
-  kernel's insert path can silently roll back a vanished anchor behind an HTTP success,
-  and the assertion, not the HTTP code, is what turns that into a visible error.
+  it must appear in the unfiltered post-write block tree fetched with the outline (the
+  same `getChildBlocks` call) — the assertion, not the HTTP code, is what turns the
+  kernel's silent rollback into a visible error.
 
 `delete` with `doc: true` carries none of the three (no doc left to outline, and no root
 row left to echo); doc-level
@@ -790,10 +789,9 @@ the decay the freshness contract exists to prevent. The moved block's ID is echo
 **`movedBlockId`**, not `newBlockId`: `moveBlock` preserves the ID (that is the
 identity-preserving property the mode exists for), and the echo is the ready target for
 a follow-up `edit` in the destination. **Verified, not trusted** (stale-target decision
-record, above): the tool asserts `movedBlockId` appears in the destination's post-move
-walk set and is absent from the source's — `moveBlock`'s transaction path can silently
-roll back a tree-level miss behind an HTTP success, and the outlines the result already
-carries are the evidence. Same-doc `move` collapses to the standard shape
+record, above): `movedBlockId` must appear in the destination's post-move walk set and
+be absent from the source's — the outlines the result already carries are the evidence.
+Same-doc `move` collapses to the standard shape
 (`outline` + `anchor`, no `destOutline`). For block-level moves the result shape differs
 only in whether the two docs differ; doc-level `move` has its own shape (`outline` +
 stored-title/`hpath` echo, no `destOutline` — its decision record above). Cost: one extra `getChildBlocks`
@@ -941,9 +939,8 @@ duplicate doc, never a silent clobber.
     subcommand and consumes no KB-name arguments. Bare `/kb` (no arguments) prints the
     current active scope. `/kb <name>` without an explicit `on|off` verb prints usage —
     no bare-name default to guess at. The reserved set is just `all` (R5 — no slug
-    convention survives, so no janitor subcommand exists). A KB named `all` is
-    rejected at `session_start` shape validation (same pass as the `defaultKBs` check),
-    naming the conflict.
+    convention survives, so no janitor subcommand exists); a KB named `all` is rejected
+    at shape validation (validation order, above).
 - **Scope read rule**: active scope = the latest `kb-scope` entry in the session file,
   else `pi-kb.defaultKBs` — latest entry wins, so resume/fork and mid-session switches
   are the same mechanism. The `kb`-param rejection message names the command:
@@ -1467,8 +1464,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     (the same shape that traps the §4 anchor rule), and again after a `replace-section`
     round-trip — the load-bearing case, where the superseded SQL outline (rowid-order
     drift; see the §3 decision record) provably broke (freshness pin); plus an
-    anchor-echo pin — an `append` on a
-    trailing-content-after-last-heading doc reports `anchor: appendBlock(root)` (the
+    anchor-echo pin — an `append` on a trailing-content-after-last-heading doc reports
+    `anchor: appendBlock(root)` (the
     §4 visibility mechanism for the doc-end fallback), and an insert-bearing write
     result's `newBlockId` resolves via `query` to the inserted content;
   - same-doc `move` result pin: a `move` whose `toDocId` names the source doc collapses to
