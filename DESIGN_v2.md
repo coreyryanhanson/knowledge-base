@@ -30,9 +30,11 @@ Contents: [1 Goals](#1-goals) · [2 Architecture](#2-architecture--two-packages)
 
 ### Non-goals (v1)
 
-- No embedding/vector/RAG layer, no entity graph, no dream-cycle/overnight consolidation —
-  GBrain's heavier machinery is deliberately deferred until the lean loop measurably falls
-  short (GBrain's own zero-key mode proves the lean loop works).
+- No embedding/vector/RAG layer, no entity graph, no dream-cycle/overnight consolidation
+  **in the initial build** — RAG is planned v2 work, not a contingency: the lean loop ships
+  first (GBrain's own zero-key mode proves it works), and v1 stays embedding-free by
+  construction so the vector sidecar lands later without re-architecture (§6 — vectors are
+  derived data over the same storage).
 - No npm publication, no semver maintenance.
 - No hard multi-KB isolation (see §6, Named ceilings).
 - No backup machinery — whatever backs the workspace (git, SiYuan sync, nothing) is the
@@ -1161,7 +1163,7 @@ duplicate doc, never a silent clobber.
 |---|---|---|
 | Soft scope only | The api token is a workspace-admin credential (the only kind SiYuan issues); KB isolation is tool-level filtering to keep other KBs out of context, not a security boundary against a hostile actor. Anything holding the token — agent or otherwise — can touch the whole workspace. | Separate SiYuan instances, if hard isolation is ever genuinely needed. (No per-KB or read-only tokens exist in SiYuan's auth model.) |
 | Agent-trust on writes | Write tools touch real notebooks. | Interactive write confirmation (v1) + KB-notebook blast radius; tighter permissioning later if trust proves unwarranted. |
-| Lean loop, no RAG | Recall depends on the model re-querying via SQL/search, not embeddings. | Add a RAG layer when the lean loop measurably falls short — as an external sidecar fed by `exportMdContent`/`query/sql`, never a second writer (GBrain precedent: its vectors/graph live in its own Postgres sidecar, not the storage format). |
+| Lean loop, no RAG (v1) | Recall depends on the model re-querying via SQL/search, not embeddings. RAG is planned v2 work, sequenced after the lean loop ships — not a contingency awaiting a shortfall measurement. | Add a RAG layer as an external sidecar fed by `exportMdContent`/`query/sql`, never a second writer (GBrain precedent: its vectors/graph live in its own Postgres sidecar, not the storage format). v1's embedding-free construction is what makes the sidecar a clean add. |
 | No bulk transactions | No documented bulk-transaction endpoint; large imports and deep restructures are sequential API calls. (Undocumented `batchAppendBlock`/`batchInsertBlock`/`batchUpdateBlock` routes exist in the kernel — headroom, not a dependency: documented-endpoints-only stands; upstream a docs PR, then adopt.) | Host-side offline import script + index rebuild (sanctioned in SY-FORMAT.md §0.5), if a bulk-ingest workload ever appears. |
 | Intra-KB moves only | `move` resolves its destination within the call's single `kb`; cross-KB reorganization has no tool mode. | Hand-move the doc in SiYuan's UI — identity is the docId, so the doc stays reachable from any query row and every follow-up write by echoed docId works; a `toKB` param if a real migration need appears. |
 | Single-KB toggles + one set-wide form | Scope activation is `/kb <name> on\|off` per KB, plus `/kb all on\|off` for set-wide actuation. Named subsets ("these 3 of 5") have no form. | Named KB groups in config (tbox precedent) if subset switching is ever genuinely needed — a group expands to N validated toggles, all-or-nothing at the validation layer. |
@@ -1560,7 +1562,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Sharing model | Local symlink/`file:`, no npm publish | npm publish | No versioning tax; general code anyway |
 | Core package shape | Library-only, zero pi imports | Core as second pi plugin | Zero context surface; no distribution channel to exploit; pi-tool-masking precedent |
 | Transport | Kernel HTTP API | MCP bridge to SiYuan's `/mcp` | Simpler, no SDK; both paths use the same admin token, MCP adds protocol overhead with no capability |
-| v1 scope | Lean agent-driven loop | RAG/graph/dream-cycle in v1 | GBrain zero-key mode proves lean loop; defer weight until needed |
+| v1 scope | Lean agent-driven loop | RAG/graph/dream-cycle in v1 | GBrain zero-key mode proves lean loop; RAG is planned v2 work, sequenced after the lean loop — v1 stays embedding-free so the sidecar lands without re-architecture |
 | Model neutrality | By construction (no model calls) | Provider abstraction layer | Nothing to abstract if you never call |
 | Write-back layout | KB notebook(s), doc trees, block-ref provenance | Append-only journal; mixed into user notebooks | GBrain entity/source separation maps to native SiYuan refs; blast radius |
 | Multi-KB config | settings.json array | Hardcoded single KB | Real use case (recipes vs projects); cheap |
