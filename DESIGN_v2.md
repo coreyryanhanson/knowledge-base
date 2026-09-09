@@ -421,7 +421,8 @@ matches against the kernel's own stored titles on the `type='d'` root rows — k
 truth, never a tool-predicted address:
 
 ```sql
--- exact leg (LIKE is ASCII-case-insensitive; % and _ escaped)
+-- exact leg (LIKE is ASCII-case-insensitive; pattern = HTML-escape(title),
+-- then % and _ LIKE-escaped)
 SELECT id, root_id FROM blocks
 WHERE box = ? AND type = 'd' AND content LIKE ? ESCAPE '\'   -- 'docker networking'
 -- near-match scan (space/hyphen variance; LIKE is ASCII-case-insensitive)
@@ -431,6 +432,11 @@ WHERE box = ? AND type = 'd' AND content LIKE ? ESCAPE '\'   -- 'docker networki
 The exact leg must be `LIKE`, not `=`: `blocks.content` carries the binary (case-sensitive)
 collation, so an `=` guard would send every ASCII-cased variant ("Docker Networking") into
 the near-match scan and the `confirmNew` interruption instead of matching transparently.
+The exact-leg pattern is built from the **HTML-escaped** submitted title (mint policy step
+2, below): the kernel stores the title IAL entity-escaped in `blocks.content`, and entity
+escaping is a deterministic, spec-defined transform, so the guard computes the stored form
+rather than being structurally blind to it. Entity output contains no `%` or `_`, so it
+composes trivially with LIKE-wildcard escaping (order: HTML-escape first, then LIKE-escape).
 Two queries, run in order: the exact leg first; only when it returns no rows does the
 near-match scan run (the scan's `AND` legs are its own query — the `...` above stands for
 the same `box`/`type='d'` filters). The scan is a plain walk over the box's `type='d'` rows
@@ -451,10 +457,18 @@ the kernel stores — it builds the submission path from ground truth:
    path separator and mint an unintended intermediate doc); >512 runes (the
    `createDocWithMd` handler silently truncates the basename to 512 before any
    kernel-side rejection can fire — the tool rejects where the kernel silently truncates);
-   contains `& < > " '` or tab/newline/control characters (the title IAL is stored
-   HTML-escaped in `blocks.content`, so such titles store transformed and the guard can
-   never match them — reject at mint with a rephrase hint, e.g. "R&D" → "R and D";
-   user-minted docs with such titles stay reachable by docId per R1).
+   contains tab/newline/control characters (their stored form is an unpredictable kernel
+   transform — reject at mint with a rephrase hint; user-minted docs with such titles
+   stay reachable by docId per R1). HTML-special characters (`& < > " '`) are **not**
+   rejected: the IAL stores them entity-escaped in `blocks.content`, but escaping is a
+   deterministic transform the tool can apply itself, so the guard matches these titles
+   via escape parity (guard SQL above) instead of rejecting them. Titles like `R&D`,
+   `O'Reilly`, or "Don't repeat yourself" mint normally — LLM agents are the primary
+   minters and such titles are common, so reject-at-mint here would be a recurring
+   interruption training agents toward awkward rephrases. The trade: one new assumption
+   (escaping parity), pinned live by the §10 title round-trip; if parity ever breaks,
+   the failure mode is a missed guard → accepted reconcilable duplicate, never a silent
+   clobber.
 3. **Send** the path the kernel will store:
    - *Top level* (no `parentId`): `path = "/" + trimmedTitle` — a single segment, so the
      kernel's parent-matching loop never runs and the doc mints deterministically at top
@@ -475,15 +489,27 @@ the kernel stores — it builds the submission path from ground truth:
    identity *and* stored shape:
    - *Top level*: `WHERE box = ? AND id = :returnedId AND type = 'd'`.
    - *Nested*: additionally re-read the parent row and assert it still exists with the
-     hpath that was used, and assert the child row's `hpath = :expectedChildHpath`
-     (stored parent hpath + "/" + title). If the parent is deleted or renamed between the
-     hpath read-back and the create, the kernel silently mints ghost intermediate docs
-     along the submitted path and nests the child under a ghost; these asserts refuse the
+     hpath that was used, and assert the child row's hpath against ground truth:
+     `child.hpath = :storedParentHpath + "/" + <child row's stored title>` — the expected
+     child hpath is built from the kernel's own stored child title, read back from the
+     returned row, **never from the submitted title**. A submission-derived assert would
+     be exactly the prediction R3 forbids: the kernel stores
+     `normalizeDocTitle(submitted)`, so any transform the rejection set doesn't cover
+     could falsely fail a successful mint — and the pinned response (retry with the same
+     title) would loop forever. If the parent is deleted or renamed between the hpath
+     read-back and the create, the kernel silently mints ghost intermediate docs along
+     the submitted path and nests the child under a ghost; these asserts refuse the
      result with a structured error (drop the ghost subtree, retry) instead of passing a
-     silently-wrong nesting. A by-title re-lookup is never used: the kernel stores
-     `normalizeDocTitle(submitted)`, so title-based assertions can falsely fail a
-     successful mint on normalization variance. The guard→create race duplicate lands in
-     the already-accepted reconcilable class.
+     silently-wrong nesting. A by-title re-lookup is never used (same reason). The
+     guard→create race duplicate lands in the already-accepted reconcilable class.
+     **Superset claim (decision record)**: the mint rejection set above (trim, `/`,
+     tab/newline/control, >512 runes) is asserted to cover every transform
+     `normalizeDocTitle` applies — any title that survives step 2 stores verbatim, so
+     the ground-truth assert cannot falsely fail and the escape-parity guard is
+     matchable. This claim is pinned live by the §10 title round-trip (clean titles must
+     store verbatim *and* yield the expected hpath); a red pin there means the rejection
+     set has fallen behind kernel normalization — extend the rejection list, never
+     predict the transform.
 5. **Echo** the stored title, real `hpath`, and root docId from the verified root row —
    display plus the docId the doctrine requires. The agent sees any normalization the
    kernel applied; the tool never predicts or matches on it.
@@ -507,7 +533,8 @@ of form for identical strings only, and LLMs paraphrase. The taxonomy, stated ex
 |---|---|
 | ASCII casing | Title guard exact leg (`LIKE`, ASCII-case-insensitive) |
 | Shared prefix ("docker-networking" vs "docker-networks") | Near-match scan (prefix on title) |
-| Identical string whose stored form would transform (HTML-special chars, tabs — rejected at mint, above) | Rejected at mint with a rephrase hint; user-minted docs with such titles fall to the accepted-duplicate path |
+| Identical string containing HTML-special chars (`& < > " '`) | Guard exact leg matches via escape parity — the pattern is built from the HTML-escaped title (mint policy step 2), so these titles mint and match normally |
+| Identical string whose stored form would unpredictably transform (tab/newline/control — rejected at mint, above) | Rejected at mint with a rephrase hint; user-minted docs with such titles fall to the accepted-duplicate path |
 | Paraphrase ("docker-networking" vs "networking-in-docker") | Nothing — accepted duplicate, reconciled later |
 
 GBrain's evidence is the same: its dedup rides embedding similarity precisely because
@@ -528,6 +555,7 @@ for the identity property.
    docIds give `duplicate` its exit (R1).
 2. **No exact row** → near-match scan (space/hyphen prefix variants on the title, above;
    `%`/`_` escaped in the fragments so a title like `100%_devops` can't widen the scan;
+   fragments are built from the HTML-escaped title, same parity as the exact leg;
    writes take exactly one KB name (§5 `kb` param), so the scan is single-notebook-scoped
    and never surfaces candidates from other notebooks, including user-owned ones; the
    scan returns doc rows, not every block) — **capped at 20 rows with the shared
@@ -1237,15 +1265,17 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 - **Unit (extension layer)**: the risky logic lives in the extension, not the client, so the
   extension gets its own suite with a mocked `siyuan-core`, covering:
   - title guard (§4 R3) — the exact leg (ASCII-cased variant matches transparently;
-    `%`/`_` in the title are escaped so they can't widen the scan), the space/hyphen
+    HTML-special titles match via escape parity — pattern built from the HTML-escaped
+    title, with `%`/`_` LIKE-escaped so they can't widen the scan), the space/hyphen
     prefix-variant scan, the 20-row candidate cap and its `truncated` marker, and the
     `confirmNew` skip path (guard fires without it, create proceeds with it); mint-policy
-    rejections — empty after trim, `/` in title, >512 runes, and HTML-special/tab/control
+    rejections — empty after trim, `/` in title, >512 runes, and tab/newline/control
     characters (each with the rephrase-hint message);
   - verified-create by-ID asserts (§4 R3) — top-level identity assert; nested assert
-    shape (parent still exists with the used hpath, child `hpath` = expected); a simulated
-    stale parent (deleted between hpath read-back and create) fails loud with the
-    structured error, never a silent ghost nesting;
+    shape (parent still exists with the used hpath, child `hpath` derived from the
+    read-back child row's stored title — ground truth, never the submitted title); a
+    simulated stale parent (deleted between hpath read-back and create) fails loud with
+    the structured error, never a silent ghost nesting;
   - parser certification — single top-level SELECT enforcement / DML rejection;
     multi-statement rejection (pinned to the executed spike: `astify` returns an array
     rather than throwing, so the cert checks `Array.isArray`); FROM-allowlist violation
@@ -1339,15 +1369,22 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   dedicated cases here — it is the highest-stakes code in the project:
   - title-guard kernel round-trip (§4 R3 — the guard rides `blocks.content`, whose exact
     behavior no unit transcription can prove, so this is the mandatory live pin): create
-    docs through the real kernel with adversarial titles — `A & B` and a tab-bearing
-    title must be **rejected at mint** with the rephrase hint (never forwarded), while
-    clean titles (leading/trailing space → trimmed, Unicode, the 512-rune boundary) store
-    verbatim and the guard's exact leg re-finds each one; a user-retitled doc (kernel
+    docs through the real kernel with adversarial titles — a tab-bearing title must be
+    **rejected at mint** with the rephrase hint (never forwarded), while HTML-special
+    titles (`A & B`, an apostrophe-bearing title) mint normally and the guard's exact
+    leg — built from the HTML-escaped title — re-finds each one (the live escape-parity
+    pin: if kernel IAL storage ever changes, this goes red instead of the guard going
+    silently blind); clean titles (leading/trailing space → trimmed, Unicode, the
+    512-rune boundary) store verbatim **and** yield the expected child hpath — the live
+    pin for the §4 superset claim (any mint-policy-surviving title must transform to
+    itself); a user-retitled doc (kernel
     `renameDoc` mid-test) still re-finds by its new stored title and misses the old one
     (one guard miss → accepted-duplicate path, asserting no data loss);
   - nested-mint case (§4 R3): create under an echoed `parentId` → the echo shows the
     real `/parent/child` hpath → `read` by the echoed docId works → re-create with the
-    same title under the same parent hits the guard; the stale-parent race (parent
+    same title under the same parent hits the guard; the verified-create nested assert
+    compares the child's hpath against the read-back child row's stored title (ground
+    truth), not the submitted title (§4); the stale-parent race (parent
     deleted between read-back and create) asserts fail-loud instead of nesting under a
     ghost (drop the ghost subtree in teardown);
   - duplicate-disambiguation case (§4 R1 — `duplicate` must have its exit): two
@@ -1581,7 +1618,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | `/kb` subcommands | Reserved-keyword check on the first argument, bare `/kb` prints the current scope, conflicts rejected at startup; the reserved set is just `all` (R5 — no slug convention survives, so no janitor subcommand exists) | `/kb repair` (overclaims, collides with plausible KB names); separate top-level commands | One reserved set, one `if`; `all`'s consumer is the surviving `/kb all on\|off` set-wide toggle, so a KB named `all` is still rejected at startup (R5) |
 | Version gate | Eager probe at `session_start`, verdict cached, writes fail-closed until one successful probe (never-probed = no writes); **strict full-version match for writes** — any drift from the pinned version refuses writes, reads warn-and-proceed (revised from major-only after external review); no *automatic* staleness re-probe — §5 recovery's per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict | Pre-write probe every call; re-probe on staleness; major-only refusal (never fires on the minor-version drift class the gate exists for — duplicate-minting create landed in v3.7.0, all pins at 3.8.2) | One HTTP call per session in the happy path (the per-write-attempt retry runs only while no probe has ever succeeded); reads unaffected; §8's pinned compose tag makes upgrades deliberate, so strictness never fires on a background point release — it fires exactly when the §10 upgrade checklist should run; mid-session version swap out of threat model |
 | Doc addressing & discovery (R1/R2/R6, **supersedes the v1 title-as-primary-key doctrine**) | Docs addressed by **echoed docId** (query/outline/write-result echoes); `read` = `kb` + `docId` (topic param removed; read-by-name does not exist); discovery is search/query's job (rows echo the doc address — `root_id` + per-row KB attribution — with `id` + `hpath` as display); the recall loop is `search/query → read {kb, docId}`, a hit directly consumable with no resolution hop; the doctrine line — *mint by title (kernel-normalized), discover by query/search, consume by ID* — pinned in the tool descriptions; doc-level targeting rides the pure-ID endpoints (`/api/filetree/moveDocsByID`, `/api/filetree/removeDocByID` — S1: the path-based `moveDocs` shapes fail the kernel's `IsNodeIDPattern` check) | Name/hpath resolution (basenames force disambiguation state machines for same-basename collisions; path-qualified topics weaken recall and re-open the A1 blocker — the v1 hpath-equality lookup could not reach a moved doc, the silent topic-fork failure); keeping read-by-topic with docId fallback (retains the near-match/duplicate machinery on the read path for one saved query hop) | SiYuan's doc ID is the identity key (`data/<notebook>/<blockID>.sy`, uniqueness by minting); hpath is a derived label — rebuilt on every rename/move, collidable (duplicate-minting create since v3.7.0, unguarded `renameDoc0`). The schema principle (targets are agent-supplied IDs read off tool-echoed data) extends up one level; scoping rides the one ownership query. GBrain anchor: its query skill discovers by search and reads full pages only on confirmed targets — this revision goes one step stricter and refuses name-reads entirely; the one-query recall hop in fresh sessions is what the vector sidecar (§6) improves rather than works around |
-| Create addressing (R3, **supersedes the v1 slug mint address**) | `create` takes a **title**; write-only existence guard on the kernel's **stored titles** (`blocks.content`, `LIKE`-based — ASCII-case-insensitive exact leg, escaped wildcards, space/hyphen prefix-variant scan); mint policy builds the submission path from ground truth (trimmed title; top-level single-segment path; nested = stored parent hpath read-back + `parentID` pair); verified-create keys on the kernel-returned root ID, fail-loud on nested shape | Guard on slug-hpath equality (inherits every hpath problem); keeping the slugifier as the mint address (predicts what the kernel stores → forced sanitize-parity, lowercase doctrine, user-edit drift class, and a janitor) | The kernel stores `normalizeDocTitle(submitted)` — a tool-predicted hpath can only be matched by replicating kernel sanitization, which was the entire downstream mechanism chain (slugifier, parity pins, lowercase rule, fix-slugs, hand-rename advisory — all deleted with it); reading stored titles back is kernel ground truth. Titles that would store transformed (HTML-special chars, tabs) are rejected at mint with a rephrase hint, so the guard only ever faces titles it can reproduce verbatim |
+| Create addressing (R3, **supersedes the v1 slug mint address**) | `create` takes a **title**; write-only existence guard on the kernel's **stored titles** (`blocks.content`, `LIKE`-based — ASCII-case-insensitive exact leg, escaped wildcards, space/hyphen prefix-variant scan); mint policy builds the submission path from ground truth (trimmed title; top-level single-segment path; nested = stored parent hpath read-back + `parentID` pair); verified-create keys on the kernel-returned root ID, fail-loud on nested shape (nested hpath assert derived from the read-back child row, never the submitted title) | Guard on slug-hpath equality (inherits every hpath problem); keeping the slugifier as the mint address (predicts what the kernel stores → forced sanitize-parity, lowercase doctrine, user-edit drift class, and a janitor) | The kernel stores `normalizeDocTitle(submitted)` — a tool-predicted hpath can only be matched by replicating kernel sanitization, which was the entire downstream mechanism chain (slugifier, parity pins, lowercase rule, fix-slugs, hand-rename advisory — all deleted with it); reading stored titles back is kernel ground truth. Titles whose stored form would unpredictably transform (tab/newline/control) are rejected at mint with a rephrase hint; HTML-special titles are guard-matched via escape parity (deterministic transform, parity pinned live by the §10 round-trip), so the guard only ever faces titles it can reproduce in their stored form |
 | Title policy (R4, **supersedes the v1 "create determinism" claim**) | Four-tier taxonomy stated explicitly: ASCII casing → guard exact leg; shared prefix → near-match scan; transform-forming strings → rejected at mint; paraphrase → accepted duplicate, reconciled later. The §6 vector-dedup sidecar is promoted to the eventual **primary** mechanism for topic identity; the guard is the zero-dep fallback | Claiming "same title → same address across sessions" as identity determinism (determinism of form for identical strings only — LLMs paraphrase, tier 4 was never solvable syntactically) | GBrain's dedup rides embedding similarity for the same reason (`create_safety: exists \| probable \| unknown`); tier-2 guard + accepted-duplicate path is their `probable/unknown` with LIKE instead of vectors |
 | User edits (R5) | UI renames and hand edits to KB docs are safe by construction — identity is the docId; no hand-rename advisory or rename-detection machinery; `/kb fix-slugs` and the `fix-` prefix reservation do not exist (nothing to repair without a slug convention); `all` stays reserved (its consumer survives) | Keeping fix-slugs for title hygiene (no slug convention left to enforce) | A rename's worst case is the accepted two-docs-reconcilable path — one guard miss, reconcilable, never data loss; block IDs and docIds survive renames untouched |
 | Settings parent key | Single `pi-kb` parent key (= package name), full shape pinned in §5 | Bare `kb` parent key; flat per-KB keys | Namespace collisions with other extensions; `defaultKBs` needs an array to reference |
