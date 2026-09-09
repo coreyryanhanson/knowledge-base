@@ -233,7 +233,12 @@ deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and
   extension owns the `box IN (...)` predicate, the agent never writes `box` or knows IDs.
   Certification is **parser-based, not token-scanned**: `pi-kb` uses **`node-sql-parser`**
   (SQLite dialect) — the extension's one runtime dependency (`siyuan-core` stays
-  zero-dep; scoping is policy, and §3 policy is extension-owned). The kernel itself uses
+  zero-dep; scoping is policy, and §3 policy is extension-owned) — **pinned to the exact
+  spike-verified version (`node-sql-parser@5.4.0`)**, same discipline as the §8 kernel
+  pin: layer 1's AST certification and CTE rejection rest entirely on this library's
+  parse/serialize behavior, so a transitive or careless bump could silently change what
+  layer 1 certifies; dependency upgrades are deliberate acts gated by the §10 upgrade
+  checklist, never drift. The kernel itself uses
   vitess `sqlparser` for its own LIMIT clamp, so parser-not-regex is
   upstream-precedented; a hand-rolled scanner's failure mode is silently wrong results,
   and one review pass already found three holes in it (OR precedence, aggregate
@@ -1227,9 +1232,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 ## 10. Testing posture
 
-- **Stack**: TypeScript + vitest (pi-tbox precedent); `node-sql-parser` (SQLite dialect)
-  in `pi-kb` is the one runtime dependency (§3 query scoping) — `siyuan-core` stays
-  zero-dep.
+- **Stack**: TypeScript + vitest (pi-tbox precedent); `node-sql-parser@5.4.0` (SQLite
+  dialect, exact-pinned — §3 query scoping) in `pi-kb` is the one runtime dependency —
+  `siyuan-core` stays zero-dep.
 - **Unit**: `siyuan-core` client tested with mocked `fetch` — request shapes, auth header,
   error mapping, version check.
 - **Unit (extension layer)**: the risky logic lives in the extension, not the client, so the
@@ -1316,7 +1321,14 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   SiYuan upgrade, run the full integration profile against the new kernel *before*
   updating the pinned version in this repo; a red suite means a behavior pin broke and
   the affected decision records in this doc need re-verification — the re-pin is a
-  verified conclusion, never a version-number bump. **Fixture policy**: setup creates **two**
+  verified conclusion, never a version-number bump. The same procedure gates the parser
+  dependency: on any `node-sql-parser` version bump, re-run the full parser certification
+  matrix (unit) — the CTE-shadow rejection case included, since layer 1 is the *sole*
+  guard against a shadowed allowlisted table (`stmt_validate.go:165` permits WITH
+  kernel-side, so a parser regression here fails silently as mis-scoped rows) — plus the
+  spike's round-trip assertions (§3) against the new version, *before* updating the pin.
+  A parser bump is earned the same way as a kernel re-pin: verified conclusion, never a
+  version-number bump. **Fixture policy**: setup creates **two**
   disposable notebooks, `pi-kb-test-fixture-a-<timestamp>` and `pi-kb-test-fixture-b-<timestamp>`,
   via the documented `createNotebook` endpoint and teardown removes them via `removeNotebook` —
   every write-path case (and every read case that filters by box) operates only inside the
@@ -1585,8 +1597,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Result budgets | Inline-cap + spill-to-temp-file (pi-browser `capFetchContent` shape); the forced-inline heading outline is budgeted like rows — first `OUTLINE_HEADINGS` inline + spill pointer, cap on rendering only | Byte-truncation in the result; trusting the kernel's `Search.Limit` clamp; unbounded inline outlines (a 2,000-heading doc defeats the minimal-context goal on every read and write) | Lossless (content deferred, not dropped); reuses native `read`/grep for extraction; one mechanism covers query/search/read; kernel limit is workspace config, a backstop not a contract |
 | Isolation | Soft (tool-level) | Hard (per-KB tokens/instances) | Named ceiling; out of scope v1 |
 | Writes | Kernel API only, ever; **replace-first** mode preference (`edit`/`replace-section` preferred, `append` for new facts, `delete`/`move` for reconciliation); `append` = `insertBlock` with `nextID=<next heading>` (a `previousID` after a section-end list nests inside it); create minted by title behind the stored-title guard, verified by **by-ID asserts on the kernel-returned root ID** (nested: fail-loud shape asserts — content check cut, §4) | Direct `.sy` file access; `appendBlock` under headings; trusting `createDocWithMd` success; whole-doc removeDoc+recreate (git restores bytes, not the block IDs other live docs reference) | Structural: VM can't see host files; kernel owns two derived indexes (blocktree.db, siyuan.db) that direct writes desync (SY-FORMAT.md §0.5); GBrain's direct writes work only because it owns its format and is sole writer; user prefers coherency (replace) over append-only growth. Verified against kernel source: `appendBlock` requires a container parent (headings are leaves); since v3.7.0 (commit `4f2148e3b`) create-on-existing-path mints a duplicate doc — the guard keeps that create from firing, and verified-create asserts the mint that does go through (R3) |
-| Query scoping | Parser-certified `box IN (...)` injection — `node-sql-parser` in `pi-kb`, parenthesized WHERE splice, FROM allowlist (`blocks`/`refs`), single-table-FROM-only (JOINs rejected: the unqualified injected `box` is ambiguous against a two-table FROM), no CTEs (kernel readonly permits WITH — `stmt_validate.go:165` — so layer 1 is the only line of defense, and a CTE shadowing an allowlisted name would fabricate in-scope rows) — plus kernel `mode: "readonly"` and the box-carrying-rows post-filter backstop; anything else rejected, never guessed at | Post-filter only (aggregates wrong, and box-less aggregate rows would all be dropped); hand-rolled token scanner (OR-precedence, aggregate-backstop, and unrestricted-FROM holes — silent mis-scope class); agent-supplied filter (guesswork); raw SQL rewriting (silent semantics change) | The parser answers "single top-level SELECT over allowlisted tables" exactly; injection lands parenthesized in the top-level WHERE so aggregates compute over in-scope rows only; `mode: "readonly"` (source-supported, same named-exception class as fullTextSearchBlock) makes the query tool structurally unable to write; the backstop exempts box-less aggregate rows because layer 1 guarantees scoping (no `blocks(box)` index — correctness mechanism, not performance) |
-| SQL certification dependency | `node-sql-parser` (SQLite dialect) in `pi-kb` | Hand-rolled token scanner; coords-based text splice | Scanner failure mode is silently wrong results; the kernel itself uses vitess `sqlparser` for its LIMIT clamp; executed parser spike (node-sql-parser@5.4.0, SQLite): no AST locations on any dialect → coords splice impossible; serializer round-trip stable on the certified subset → injection = AST rebuild + `sqlify` + re-parse verification; multi-statement returns an array (reject), UNION hides in `_next`/`set_op` under `type: 'select'` (reject on fields); `siyuan-core` stays zero-dependency |
+| Query scoping | Parser-certified `box IN (...)` injection — `node-sql-parser@5.4.0` exact-pinned in `pi-kb` (bumps gated by the §10 upgrade checklist: parser regression = silent mis-scope), parenthesized WHERE splice, FROM allowlist (`blocks`/`refs`), single-table-FROM-only (JOINs rejected: the unqualified injected `box` is ambiguous against a two-table FROM), no CTEs (kernel readonly permits WITH — `stmt_validate.go:165` — so layer 1 is the only line of defense, and a CTE shadowing an allowlisted name would fabricate in-scope rows) — plus kernel `mode: "readonly"` and the box-carrying-rows post-filter backstop; anything else rejected, never guessed at | Post-filter only (aggregates wrong, and box-less aggregate rows would all be dropped); hand-rolled token scanner (OR-precedence, aggregate-backstop, and unrestricted-FROM holes — silent mis-scope class); agent-supplied filter (guesswork); raw SQL rewriting (silent semantics change) | The parser answers "single top-level SELECT over allowlisted tables" exactly; injection lands parenthesized in the top-level WHERE so aggregates compute over in-scope rows only; `mode: "readonly"` (source-supported, same named-exception class as fullTextSearchBlock) makes the query tool structurally unable to write; the backstop exempts box-less aggregate rows because layer 1 guarantees scoping (no `blocks(box)` index — correctness mechanism, not performance) |
+| SQL certification dependency | `node-sql-parser@5.4.0` (SQLite dialect) exact-pinned in `pi-kb` — bump gated by the §10 upgrade checklist | Hand-rolled token scanner; coords-based text splice | Scanner failure mode is silently wrong results; the kernel itself uses vitess `sqlparser` for its LIMIT clamp; executed parser spike (node-sql-parser@5.4.0, SQLite): no AST locations on any dialect → coords splice impossible; serializer round-trip stable on the certified subset → injection = AST rebuild + `sqlify` + re-parse verification; multi-statement returns an array (reject), UNION hides in `_next`/`set_op` under `type: 'select'` (reject on fields); `siyuan-core` stays zero-dependency |
 | Search request shape | `paths: [<boxId>]` (kernel derives boxes from the first path segment) | A `boxes` JSON field | No such field exists — silently ignored → whole-workspace search where pre-filter truncation can drop all in-scope matches |
 | Search method param | `method` is tool-owned: extension always sends `method: 0` (keyword) and rejects agent-supplied values — the same ownership rule covers the aux params `types`/`orderBy`/`groupBy`, which the tool **omits entirely** (kernel defaults apply; absent is the pinned behavior) | Exposing `method` (or the aux params) to the agent; inventing tool-side defaults for the aux params | `method: 2` is SQL search gated to admin role only (`api/search.go`) — the API token is always admin, so an agent-supplied `method` would smuggle raw SQL through the search route past the §3 parser certification; one tool-schema constraint closes it |
 | replace-section ordering | Insert new body, then delete old (insert-before-delete) | Delete-then-insert | Mid-sequence failure costs visible duplication, never loss — no kernel transactions (§6) |
