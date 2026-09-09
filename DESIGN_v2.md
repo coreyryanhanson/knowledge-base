@@ -104,8 +104,9 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
   throttle constants and sweep live in kernel/util/session.go, cited in-source as
   GHSA-2x7j-p79w-7744; both advisories cover this throttle). The client maps
   HTTP 429 distinctly from generic auth failure (one misconfigured session must not lock
-  the IP and degrade confusingly); the envelope message names the lockout and the fix
-  (correct the token, wait out the lock). A 429 can arrive with a **correct** token — the
+  the IP and degrade confusingly); the envelope message names the lockout and its self-healing
+  expiry — never "correct the token" (with a correct token that advice is wrong and invites
+  settings edits; the full guidance text is pinned in §5). A 429 can arrive with a **correct** token — the
   lock is keyed by client IP and shared across clients, so another session's or client's
   bad-token failures lock the VM's IP for everyone (the §5 two-session 3+3 case); the
   extension's handling of that case is pinned in §5, not here. The lock is per-IP and
@@ -971,7 +972,7 @@ duplicate doc, never a silent clobber.
   still-failed retry refuses only that write.
 - **Auth-lockout circuit breaker (decision record)**: the kernel rate-locks IPs on the
   **6th consecutive auth failure within a 15-minute window** (fail counts ≤ 5 still pass —
-  `util/session.go` `FailCount <= 5`; 30 s base, 15 min max backoff), and locked-out
+  `util/session.go` `FailCount <= 5`; first lock 60 s, exponential to a 15 min max), and locked-out
   requests themselves increment the counter, extending the lock. The lock is shared with
   the access-auth-code path, so a lockout kills *reads* too, not just writes. The
   client-side never-retry rule (§2) does not cover the real hazard: the agent's own
@@ -983,7 +984,7 @@ duplicate doc, never a silent clobber.
   The budget of 3 deliberately sits under the kernel's lock threshold under either
   reading of its boundary. The breaker counts **per session**, while the kernel lock is
   keyed by **client IP** — two concurrent sessions with the same bad token contribute
-  3 + 3 = 6 failures and trip the kernel's 30 s lock. That is self-healing and
+  3 + 3 = 6 failures and trip the kernel's first 60 s lock. That is self-healing and
   read-degrading, not a design break: the cross-session sum is visible (both sessions
   degrade), the concurrent-sessions risk row (§9) already accepts shared-notebook races,
   and closing it would need a shared-breaker file — machinery a single-user VM topology
@@ -1001,14 +1002,36 @@ duplicate doc, never a silent clobber.
     breaker stays strictly a 401/403 mechanism. It is also **never auto-retried** (§2's
     client rule; a retry during an active lock extends the lock — the exact runaway loop
     the breaker exists to prevent, reachable here with a perfectly correct token). The
-    tool returns the distinct 429 envelope naming the lockout, its cause (IP-keyed lock,
-    possibly tripped by another client), and its self-healing expiry (30 s base backoff
-    on the kernel side; quote the kernel's `Retry-After` when present — with one
+    **Structural guard (decision record)**: a message alone re-creates the "agent
+    discipline" pattern the design rejects everywhere else — a model that retries the
+    refused tool makes a real kernel call each time, and every call during an active lock
+    extends it. So after the first 429 the extension holds a **cooldown deadline**
+    (`now + Retry-After`, floored at 60 s — the verified first lock; the served header
+    understates a lock extended since it was computed, so the deadline is advisory, and
+    the worst case is one extra kernel call per window, bounded by design): every kb tool
+    call before `cooldownUntil` returns the refusal **locally, with zero kernel
+    round-trips**, so a retrying model cannot extend the lock no matter how it behaves.
+    The gate lives beside the breaker (same dispatch point, same `{status: refused}`
+    envelope, message distinguishing the cause); it needs no expiry polling (any poll
+    would itself extend the lock), no cross-restart persistence (the kernel lock survives
+    a restart anyway; one wasted call per restart is bounded, not a loop), and no
+    per-tool cooldowns. The cooldown gates **tool calls only** — a `/kb` re-check remains
+    the user-typed, human-paced act (§5 recovery), with the degraded-state message still
+    saying wait out the lock first. The tool returns the distinct 429 envelope naming the
+    lockout, its cause (IP-keyed lock, possibly tripped by another client), and its
+    self-healing expiry (first kernel lock 60 s — `30 << (6-5)`; quote the kernel's
+    `Retry-After` when present — with one
     multiplier fact pinned, S2: any single call during an active lock **extends** the
     lock (locked-out requests themselves increment the counter, exponential backoff:
     FailCount 6 → 7 → 120 s), and the interleaved 429's `Retry-After` header is computed
     *before* that extension — so the served header understates the new lockout, and the
-    honest guidance is **wait out the lock with zero calls first, then retry**); it carries
+    honest guidance is **wait out the lock with zero calls first, then retry**). The
+    refusal message tells the model: your token is probably correct — do **not** change
+    the token or settings, and do not retry; all kb calls are refused for the stated
+    window; report the lockout to the user and pause kb work until then (the model cannot
+    sleep mid-turn, so yielding to the user is the only useful action and saves tokens vs
+    spinning on harmless-but-billed local refusals; headless, the expiry note does the
+    work — the lock self-heals and the next call simply succeeds); it carries
     `{status: refused}` — the breaker's fail-fast value, since both states mean "no
     kernel calls will pass" — with the message, not the status, distinguishing the
     two causes. No `/kb` recovery
@@ -1187,7 +1210,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 |---|---|---|
 | VM→host connectivity fails | ~~Unknown~~ **Resolved** — smoke test passed (Milestone 0) | Was compose/firewall fix; not an architecture problem. |
 | Unauthenticated workspace access (deployment drift) | ~~Unknown~~ **Resolved** — auth posture verified (Milestone 0) | Non-empty access auth code keeps the anonymous-admin bypass dead; API-token matrix (no-token → rejected, bogus → rejected, real token → `code:0` on guarded + SQL endpoints) passed from the VM. `/api/system/version` has no auth middleware and proves connectivity only — guarded endpoints must be probed when re-verifying. |
-| Auth lockout from agent retry loops | Medium (model tool-retry loops are common) | Extension circuit breaker: 3 consecutive auth failures → degraded fail-fast (§5), under the kernel's lock threshold (6th consecutive failure within a 15-min window); the client never retries 401/403/429 (§2). A 429 with a correct token (lock tripped by a concurrent session or client) is surfaced as the self-healing 429 refusal — never counted toward the breaker, never retried (§5). The source-read throttle contract (threshold, window, backoff, `Retry-After`, lock-extension, self-heal) is pinned by the §10 integration throttle case (§5 has the full record). |
+| Auth lockout from agent retry loops | Medium (model tool-retry loops are common) | Extension circuit breaker: 3 consecutive auth failures → degraded fail-fast (§5), under the kernel's lock threshold (6th consecutive failure within a 15-min window); the client never retries 401/403/429 (§2). A 429 with a correct token (lock tripped by a concurrent session or client) is surfaced as the self-healing 429 refusal — never counted toward the breaker, never retried (§5) — and arms a cooldown deadline (now + `Retry-After`, floor 60 s): further kb tool calls are refused locally with zero kernel round-trips, so a retrying model cannot extend the lock (§5). The source-read throttle contract (threshold, window, backoff, `Retry-After`, lock-extension, self-heal) is pinned by the §10 integration throttle case (§5 has the full record). |
 | SiYuan kernel API drift | Low (community-stable for years) | Eager version probe at `session_start` (§2) against the pinned tested version; core is thin so surface area is small. The probe refuses writes on **any** drift from the pinned full version — the strict-gate rationale is the §2 decision record; enforcement is the §10 upgrade checklist (run the suite against the new kernel first, then re-pin — a verified conclusion, never a version-number bump). |
 | Model writes garbage into notebooks | Medium | Interactive write confirmation; KB notebooks bound blast radius; user backup strategy outside extension scope. |
 | Headless prompt injection widens scope | Low (corner-case config) | `/kb` dispatches on headless prompt text (§5 headless bound), so untrusted content interpolated into a `pi -p` prompt can carry `/kb all on` and widen an unattended session's write blast radius. **Unsupported combination (§5): headless + `allowUnattendedWrites: true` + untrusted content in the prompt string** — keep untrusted input in files the agent reads via tools; tool results never dispatch commands. Bounded regardless: activation is config-validated, soft-scope ceiling applies (§6). |
@@ -1268,8 +1291,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     proceed; a failed re-check re-engages degradation all-or-nothing instead of
     looping, §5);
   - 429 handling — a 429 with a correct token does not increment the breaker and does
-    not retry; the result names the lockout and its self-healing expiry, and a
-    post-expiry call succeeds without any recovery step (§5);
+    not retry; the result names the lockout and its self-healing expiry, a call inside
+    the cooldown window returns the local refusal with no kernel round-trip (zero
+    requests on the test-harness request log), and a post-expiry call succeeds without
+    any recovery step (§5);
   - settings validation order (shape → probe → notebooks, incl. the
     project-declares-`kbs` warning branch and the token-failure branch);
   - error-envelope shape;
@@ -1455,14 +1480,17 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     class with `Retry-After` (the class the breaker deliberately excludes); interleave
     one correctly-authenticated request during the lockout and assert it receives the
     same 429 (the shared per-IP lock, the §5 two-session 3+3 case exercised for real);
-    wait out the `Retry-After` the lockout asserted and assert the next
+    with the lock still active, make a further kb tool call and assert the cooldown
+    refusal — `{status: refused}`, lockout message, and **no kernel request issued**
+    (empty test-harness request log for the refusal — the structural guard is proven,
+    not the message); then wait out the `Retry-After` the lockout asserted and assert the next
     correctly-authenticated call succeeds with no recovery step (the §5 self-healing
     expiry; the wait follows the header, not the base constant — the interleaved
     request extends the lock, §5). **Ordering: the lock is
     per-IP, so this case 429s every other kernel call from the VM while active — it runs
     after all other kernel-dependent cases and before the raw-DELETE case, and ends by
     waiting out the backoff so the lock is expired before the case that follows.**
-    **Cost (S2 correction): expect ~2 minutes, not ~30 s** — the in-test wait is bounded
+    **Cost (S2 correction): expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
     by the *extended* lock, not the served `Retry-After`: the interleaved request
     extends the lock, and its 429 header was computed before the extension, so the
     header understates the new lockout (§5 429 record);
@@ -1560,7 +1588,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Search request shape | `paths: [<boxId>]` (kernel derives boxes from the first path segment) | A `boxes` JSON field | No such field exists — silently ignored → whole-workspace search where pre-filter truncation can drop all in-scope matches |
 | Search method param | `method` is tool-owned: extension always sends `method: 0` (keyword) and rejects agent-supplied values — the same ownership rule covers the aux params `types`/`orderBy`/`groupBy`, which the tool **omits entirely** (kernel defaults apply; absent is the pinned behavior) | Exposing `method` (or the aux params) to the agent; inventing tool-side defaults for the aux params | `method: 2` is SQL search gated to admin role only (`api/search.go`) — the API token is always admin, so an agent-supplied `method` would smuggle raw SQL through the search route past the §3 parser certification; one tool-schema constraint closes it |
 | replace-section ordering | Insert new body, then delete old (insert-before-delete) | Delete-then-insert | Mid-sequence failure costs visible duplication, never loss — no kernel transactions (§6) |
-| Auth lockout | Extension circuit breaker, 3 consecutive auth failures → degraded fail-fast; 429 with a correct token is a separate class — never counted toward the breaker, never retried, surfaced as a self-healing lockout refusal (the state is kernel-side and expires on its own, so no `/kb` recovery applies); recovery = any `/kb` dispatch re-runs the full validation pass (settings re-read, probe, notebooks) and on success clears the breaker | Client-side never-retry alone; restart-only recovery; counting 429s toward the breaker (a healthy session would degrade for another client's bad token) | The kernel locks the IP on the 6th consecutive failure in a 15-min window (locked-out requests themselves extend the lock), shared with the access-auth path; the agent's own tool-call retries are the retry loop. A sticky breaker without a re-read path would keep refusing after the token is fixed (settings are injected at construction); the `/kb` hook is user-typed and un-invocable by the agent, so it can never widen its own retry budget. The source-read throttle numbers are pinned by the §10 integration throttle case (§5 has the full record) |
+| Auth lockout | Extension circuit breaker, 3 consecutive auth failures → degraded fail-fast; 429 with a correct token is a separate class — never counted toward the breaker, never retried, surfaced as a self-healing lockout refusal (the state is kernel-side and expires on its own, so no `/kb` recovery applies), and arms a **cooldown deadline** (now + `Retry-After`, floor 60 s) under which every kb tool call is refused locally with zero kernel round-trips — the structural counterpart to the breaker, so a retrying model cannot extend the lock; the refusal message says the token is probably correct, forbids token/settings edits and retries, and tells the model to report and pause; recovery = any `/kb` dispatch re-runs the full validation pass (settings re-read, probe, notebooks) and on success clears the breaker | Client-side never-retry alone (the agent's tool-call retry loop is the real retry loop); a message-only 429 refusal (a model that retries makes real kernel calls, each extending the lock — the "agent discipline" pattern the design rejects); restart-only recovery; counting 429s toward the breaker (a healthy session would degrade for another client's bad token) | The kernel locks the IP on the 6th consecutive failure in a 15-min window (locked-out requests themselves extend the lock — a model-paced retry loop can keep the whole VM locked out), shared with the access-auth path. The cooldown converts the dangerous loop into a harmless one (local time check, no lock extension) without expiry polling (any poll extends the lock), cross-restart persistence (kernel lock survives restart anyway; one bounded wasted call), or per-tool cooldowns. A sticky breaker without a re-read path would keep refusing after the token is fixed (settings are injected at construction); the `/kb` hook is user-typed and un-invocable by the agent, so it can never widen its own retry budget. The source-read throttle numbers (first lock 60 s = `30 << (6-5)`, second 120 s) are pinned by the §10 integration throttle case (§5 has the full record) |
 | Encrypted notebooks | Rejected at `session_start` validation (`encrypted: true` → KB rejected, named) | Warn-and-proceed | The SQL surface sees only the global `siyuan.db` — an encrypted KB's blocks are invisible to the title guard, verified-create's by-ID asserts, and the backlink check, so the §4 flow misfires (§5, §9) |
 | Tool surface for reconciliation | Write-back gains `delete` (block/doc) and `move` modes; `move` is cross-doc, intra-KB only (cross-KB reorganization is a UI hand-move, §6) — destination by `toDocId` (echoed, ownership-checked like every doc target) + optional `toHeadingId`, tool-fetched destination outline, tool-derived anchor across the doc boundary; result carries both outlines (`outline`/`destOutline`) + `movedBlockId` (ID preserved by `moveBlock` — never a fresh mint); `move doc: true` is the doc-level flavor via `/api/filetree/moveDocsByID` (`fromIDs` + `toID`, S1) — restructure/growth vehicle alongside nested `create` (`toDocId` omitted → un-nest to notebook root); tool-side self-descendant rejection because the kernel silently no-ops that move (`FilterMoveDocFromPaths`) | Defer reconciliation/restructure out of v1; insert-copy+delete for cross-doc moves (mints fresh IDs, orphans inbound refs — the no-whole-doc-rewrites hazard at block granularity) | §4's `duplicate` status and doc-tree restructuring are unreachable without them; still one tool, mode param; `moveBlock`/`moveDocsByID` preserve block IDs so provenance survives; a move touching two docs must echo both fresh outlines or the next chained write runs stale; after a doc-level move the doc is consumed by its echoed docId — the hpath echo is display only (R1) |
 | Search transport | Named exception for `/api/search/fullTextSearchBlock` (`paths`-derived scoping + post-filter backstop) | SQL `content LIKE` only; full MCP transport | SiYuan's MCP server exposes `search.fulltext` as a supported agent-facing tool wrapping the identical kernel function — upstream support commitment by proxy; fallback if it breaks: SQL `LIKE` over documented `/api/query/sql` |
