@@ -189,7 +189,7 @@ never dead-ends on attribution. (Kernel shape verified at 3.8.2: the route retur
    echoed target, never invented by the agent; read-by-name does not exist, and the
    ownership query doubles as the scoping check. On success the tool returns the doc
    body (spill budget below) plus the outline ride-along (below); the recall loop is
-   `search/query → read {docId}` (§4).
+   `search/query → read {kb, docId}` (§4).
 4. **write-back** — create/update/reconcile distilled knowledge in KB notebooks
    (interactive write confirmation, always on). Write modes and collision handling are
    pinned in §4 (echoed-docId targeting, create-by-title with the stored-title
