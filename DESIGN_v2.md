@@ -1473,9 +1473,31 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     `kb: [fixture-a, fixture-b]` equals the sum of the two fixtures' seeded counts — the
     parenthesized-injection pin (deterministic because the fixture policy supplies exactly
     the two notebooks the query touches).
-- **End-to-end (manual checklist)**: the click-moment test — tell the agent to remember X,
-  restart the session, ask for X back; the answer must come from SiYuan, not chat context.
-  Cross-session recall is the product.
+- **End-to-end (automated recall harness)**: cross-session recall is the product, and the
+  failure class its test guards — a correct answer reconstructed from chat context or
+  session residue instead of read from SiYuan — is indistinguishable from success to a
+  human watching a click-through. So the loop is automated, headless (`pi -p` runs
+  extension commands — verified against pi source, §5 scope-activation record):
+  **(1) Plant** — session A with `allowUnattendedWrites: true`, prompt to remember a fact
+  carrying a fresh random **nonce** (unique per run, so no prompt template, system
+  context, or prior transcript can ever satisfy recall); then assert directly against
+  the kernel — fixture SQL — that the fact actually landed in the fixture KB (the plant
+  itself is verified, not assumed). **(2) Restart** — a brand-new session: fresh chat
+  state, fresh spill dir, scope activated via `/kb` dispatch (the same headless posture
+  §5 pins). **(3) Recall** — ask for the fact back; assert the answer contains the
+  nonce, and assert **kernel-sourcing from the transcript**: at least one
+  `search`/`query`/`read` tool call strictly between the question and the answer (the
+  R1 recall loop observed, not trusted). **(4) Negative control** — delete the planted
+  doc from the kernel, rerun steps 2–3 against the same nonce, and assert recall now
+  *fails*. This is what makes the harness a falsifier rather than a demo: a run that
+  leaks context fails step 4, exactly where a click-through would have scored another
+  false positive. Fixture hygiene: the planted fact exists nowhere except the fixture
+  KB — not in any file under the session cwd, not in config, not in the prompt beyond
+  the plant instruction itself. **What stays manual**: the interactive click-moments
+  automation cannot reach — write-confirmation allow/refuse in a TTY session, status
+  slot visibility, and the M4 real-KB exercise (recipes epub extraction) — folded into
+  a residual checklist whose job shrinks from "prove recall works" to "prove the
+  interactive moments work".
 
 ## 11. Milestone rollout
 
@@ -1485,7 +1507,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | 1 | Repo scaffold — monorepo or two dirs, `siyuan-core` package skeleton, settings schema | `vitest` runs green on trivial test |
 | 2 | `siyuan-core` client — typed endpoints, auth, version check, mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists (the *tool-path* case lands with the extension at M3); the **auth-throttle contract pin** included, ordering per §10; **search `paths`-shape pin runs first** — cheapest falsifier, guards the silent whole-workspace-degradation failure mode §3 search-scoping rests on; a no-code precursor — two `curl` calls from the host — can run before any client code exists) |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), and the stale-target contract pin (§4) |
-| 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | Manual click-moment checklist passes end to end |
+| 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
 ---
 
@@ -1514,6 +1536,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Error surface | `{status, message}` envelope on every tool result | Free-text with fixed prefixes | near_matches/truncated already structured; one shared helper; refusals always name the fix |
 | Headless writes | Default-deny; enabled by `pi-kb.allowUnattendedWrites: true`; interactive sessions always confirm (no per-session toggle); RPC (`--mode rpc`) is not headless — its confirm dialog works via the extension UI sub-protocol, with a timeout so a non-responding client auto-refuses (§5); untrusted content must enter via files/tools, never interpolated into headless prompt strings — prompt text dispatches `/kb` (§5 residual, §9) | Default-allow headless; CLI flag; per-session toggle chat state | Unattended writes require a typed opt-in; settings is the only escape hatch headless can reach; a toggle adds convenience, not capability; the confirm timeout keeps every RPC client shape fail-closed (cancelled/timeout ⇒ refused, never a hang, never a silent allow) |
 | Spill files | `os.tmpdir()/pi-kb/<session-id>/`, `{tool}-{sha256-16hex}` (`.jsonl` for row and outline spills, `.md` for raw read spills), 8000-char preview; **no cleanup machinery** — files persist until OS reboot | TSV rows; task-hash names; flat shared dir; terminal-shutdown cleanup | Lossless, self-describing, still line-greppable; content-hash dedupes; per-session dir avoids cross-session interference without tracking; no cleanup means no unsafe-delete bug class (`session_shutdown` fires on resume/fork, where the transcript still quotes spill paths) and no terminal-shutdown definition to pin — accumulation is cosmetic and reboot-bounded |
+| Recall test | **Automated headless harness** (§10): nonce-planted fact, kernel-side plant assert, fresh-session recall with transcript-proven tool use, negative control (delete → must-not-recall) | Manual click-through only (a human cannot distinguish kernel-sourced recall from chat-context reconstruction — the exact failure class the product exists to prevent — and a demo proves nothing about regressions); full UI automation of interactive moments | `pi -p` runs extension commands (verified, §5); the nonce makes a context-sourced false positive structurally impossible, not merely unlikely; the negative control converts "the harness detects sourcing" from assumption into evidence — the same move as the search-shape and throttle pins; interactive-only moments (confirmation dialogs, status slot) stay manual because headless cannot exercise them |
 | Unreachable startup | Degrade: session lives, tools registered, per-write-attempt probe retry while no successful probe exists; `kb` status-bar slot (active KBs + connectivity) | Fail session; lazy-connect | Chat shouldn't die as sidecar collateral; gate stays fail-closed; visible state via status slot |
 | Result budgets | Inline-cap + spill-to-temp-file (pi-browser `capFetchContent` shape); the forced-inline heading outline is budgeted like rows — first `OUTLINE_HEADINGS` inline + spill pointer, cap on rendering only | Byte-truncation in the result; trusting the kernel's `Search.Limit` clamp; unbounded inline outlines (a 2,000-heading doc defeats the minimal-context goal on every read and write) | Lossless (content deferred, not dropped); reuses native `read`/grep for extraction; one mechanism covers query/search/read; kernel limit is workspace config, a backstop not a contract |
 | Isolation | Soft (tool-level) | Hard (per-KB tokens/instances) | Named ceiling; out of scope v1 |
