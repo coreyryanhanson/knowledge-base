@@ -966,19 +966,30 @@ duplicate doc, never a silent clobber.
         { "name": "projects", "notebook": "20240101130000-efgh456" }
       ],
       "defaultKBs": ["projects"],
-      "allowUnattendedWrites": false
+      "allowUnattendedWrites": false,
+      "writeConfirmTimeout": 60
     }
   }
   ```
 
   `name` is the human-facing primary key (the `kb` tool param and `/kb` operate on names);
+  names must be single tokens — no whitespace or `/` (shape validation rejects them, the
+  `/kb <name> on|off` grammar is unparseable otherwise, §5 validation step 1);
+  `writeConfirmTimeout` (seconds, default 60) is the write-confirmation dialog timeout —
+  `0` waits indefinitely (§5 write-confirmation record);
   `notebook` is the SiYuan notebook ID. Nothing is hardcoded: `siyuan-core` receives
   `baseUrl` + `token` as constructor args and has zero knowledge of IPs, env, or pi; the
   extension is the only layer that reads settings.json and injects them.
 - **Validation order (decision record)**: at `session_start`, three steps in fixed order:
   1. **Shape/sync validation** (no network): required keys, types, unique `kbs` names,
      `defaultKBs` names exist in `kbs`, and KB names checked against the `/kb` reserved
-     set (subcommand surface below — a KB named `all` is rejected here).
+     set (subcommand surface below — a KB named `all` is rejected here). KB names are
+     also rejected at this pass when they contain whitespace or `/` — the toggle grammar
+     is `/kb <name> on|off` split on whitespace, so `my projects` or `projects on` is
+     unparseable at toggle time (`projects on` collides with the verb itself); the
+     constraint is enforced where names enter the config, and the rejection message
+     names it (`name must not contain whitespace or /`) — bad names never reach the
+     parse ambiguity, not handled after it.
      Failure **degrades** the session — tools stay
      registered, every call is rejected with the problem named — rather than crashing it.
   2. **Kernel probe** — the §2 version gate, fail-closed for writes.
@@ -1019,7 +1030,22 @@ duplicate doc, never a silent clobber.
   mode precisely because the dialog methods are functional via that sub-protocol. The
   extension therefore passes a **timeout on every confirm dialog**: a timeout expiry or
   an explicit client cancellation auto-resolves to refused — fail-closed in every
-  direction, and never a deadlocked turn on a blocking dialog. The two RPC client shapes
+  direction, and never a deadlocked turn on a blocking dialog. The timeout value is the
+  **`pi-kb.writeConfirmTimeout`** setting (seconds, default 60 — pinned, not invented
+  per implementer; this is the disruption-vs-oversight dial, so it is user-owned rather
+  than a constant): `0` waits **indefinitely** (the dialog blocks the write until
+  answered — the right value for a user who is usually at the keyboard; no tokens burn
+  while blocked). A timeout expiry resolves to refused with reason **`confirm_timeout`**,
+  which is **terminal for that write in that session**: a re-request of the *same* write
+  returns the terminal refusal immediately (no new dialog) with a message instructing
+  the agent not to retry, to stop, and to report the pending write — without this pin,
+  an AFK user + a retrying agent is an unbounded confirm/timeout/refuse loop burning
+  tokens on refusals (the exact retry-treadmill class the 429 cooldown exists to
+  prevent, §5/§9). An *explicit* decline (`confirmed: false`) stays ordinary recoverable
+  `refused` — the user answered, so re-asking a rephrased variant is legitimate. The two
+  settings stay orthogonal: `writeConfirmTimeout` is how long to hold the dialog,
+  `allowUnattendedWrites` is whether to ask at all (headless); never-asked is a typed
+  opt-out in settings, never a side effect of a timeout value. The two RPC client shapes
   collapse to the same safety boundary: a full client (implements the UI sub-protocol)
   behaves like an interactive session with a remote confirm UI; a minimal client that
   ignores or dismisses the request yields `confirmed: false`/timeout ⇒ write refused —
@@ -1028,7 +1054,8 @@ duplicate doc, never a silent clobber.
   writes; the opt-out is typed, in settings. (A per-session confirmation toggle was
   considered and cut: `allowUnattendedWrites` already covers the only real opt-out —
   headless — and confirmation off in an interactive session adds convenience, not
-  capability. Revisit if click-through demonstrably annoys.)
+  capability; the tuning need `writeConfirmTimeout` now serves is the disruption dial,
+  not a capability widening. Revisit if both knobs demonstrably still annoy.)
 - **Scope (session state)**: active KB scope persisted via `pi.appendEntry("kb-scope", ...)`,
   read on `session_start`. This uses pi's native session persistence — survives session
   resume/fork, stays out of LLM context.
@@ -1274,7 +1301,14 @@ duplicate doc, never a silent clobber.
   - The query tool description documents the kernel's `refs` table schema (id, def_block_id,
     def_block_root_id, block_id, root_id, box, … — database.go) so ad-hoc agent backlink queries
     don't require guessing column names; the delete flow's automated backlink check (§4) uses the
-    same table. Virtual mentions (text matches in `blocks_fts`) are intentionally out of reach —
+    same table. The description also pins the kernel's `blocks` table schema (`id`,
+    `parent_id`, `root_id`, `hpath`, `box`, `type`, `content`, `updated`, `sort`, … —
+    database.go) with the two semantics notes agents demonstrably misread: **`sort` is a
+    block-type weight, not display order** (§3 — `ORDER BY sort` does not yield document
+    order; heading order comes from the outline or the `parentID`/`previousID` anchors),
+    and **`hpath` is a derived display label** stamped on every row (R1 — never an
+    address). The discovery doctrine's ad-hoc SELECTs run against this table, so it gets
+    the same no-guessing treatment as `refs`. Virtual mentions (text matches in `blocks_fts`) are intentionally out of reach —
     they are not identity refs and are irrelevant to delete safety. It also pins the
     **include-`hpath` discovery pattern**: `hpath`, `root_id`, and `updated` are columns
     on every
@@ -1414,8 +1448,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - scope resolution (`persisted → defaultKBs`, reason-agnostic, incl. the absent-key →
     empty-set branch);
   - `/kb` toggle writes — bare `/kb`, verbless `/kb <name>` usage output, idempotent
-    re-toggle, `/kb all off` empty-scope write, zero-valid-KB no-op report, and the
-    reserved-keyword rejection for a KB named `all`;
+    re-toggle, `/kb all off` empty-scope write, zero-valid-KB no-op report, the
+    reserved-keyword rejection for a KB named `all`, and the name-grammar rejection for
+    a KB whose name contains whitespace or `/` (the §5 shape-validation constraint);
   - spill inline-cut/preview/per-session-dir (no-cleanup posture) plus the outline cap
     (an over-`OUTLINE_HEADINGS` outline inlines the first N lines + spill pointer, and
     the §4 verification and anchor logic run on the full unfiltered walk set regardless);
@@ -1446,7 +1481,12 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - write-confirmation branches — allow/refuse; a cancelled confirm and a timed-out
     confirm both resolve to refusal (the §5 fail-closed direction; the confirm call
     carries the timeout so an unresponsive RPC client cannot deadlock the turn); a
-    `replace-section` confirmation on a final section displays the enumerated delete
+    timed-out confirm carries reason `confirm_timeout`, a re-request of the same write
+    after it returns the terminal refusal immediately with no new confirm call (the
+    mocked suite asserts the confirm mock fires exactly once across both calls — the
+    AFK retry-treadmill pin), and an explicit `confirmed: false` decline stays
+    recoverable `refused`; `writeConfirmTimeout: 0` issues the confirm with no timeout
+    (blocks until answered); a `replace-section` confirmation on a final section displays the enumerated delete
     set's block count plus the inbound-ref count and referring doc hpaths over the
     walk-enumerated delete set (the §4 visibility fixes for trailing content the
     heading-only outline can't show and for refs into section content), and the
@@ -1780,6 +1820,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Multi-KB search fan-out | One kernel call per resolved KB (`paths: [<boxId>]`, shared limit as `pageSize`), merged extension-side — per-KB kernel order preserved; per-call truncation accounting aggregated into the envelope marker | One call with multiple `paths` entries under a single `pageSize`; raising `pageSize` to cover the union | The kernel takes one `pageSize` over the union of boxes, so a hit-rich KB fills the pre-filter window and silently starves other KBs' in-scope matches — dropped pre-filter, invisible to both the post-filter backstop and the truncation marker (the same silent-miss class as the `paths` shape, one layer deeper); query has no such hole (`box IN (...)` filters inside SQLite before `LIMIT`), so fan-out restores recall parity between the two discovery tools; no global relevance rank exists anyway (kernel rows carry no scores), so per-KB ordering loses nothing; a single active KB degenerates to the exact single-call shape. Pinned by the §10 two-KB saturation case |
 | Search method param | `method` is tool-owned: extension always sends `method: 0` (keyword) and rejects agent-supplied values — the same ownership rule covers the aux params `types`/`orderBy`/`groupBy`, which the tool **omits entirely** (kernel defaults apply; absent is the pinned behavior) | Exposing `method` (or the aux params) to the agent; inventing tool-side defaults for the aux params | `method: 2` is SQL search gated to admin role only (`api/search.go`) — the API token is always admin, so an agent-supplied `method` would smuggle raw SQL through the search route past the §3 parser certification; one tool-schema constraint closes it |
 | replace-section ordering | Insert new body, then delete old (insert-before-delete) | Delete-then-insert | Mid-sequence failure costs visible duplication, never loss — no kernel transactions (§6) |
+| Write-confirmation timeout | `pi-kb.writeConfirmTimeout` (seconds, default 60): user-owned disruption dial; `0` waits indefinitely; timeout expiry refuses with reason `confirm_timeout`, **terminal for that write in that session** — a same-write re-request returns the terminal refusal immediately (no new dialog), message tells the agent to stop and report the pending write; an explicit `confirmed: false` decline stays recoverable `refused` | A pinned constant (no universal value exists — disruption-vs-oversight is user preference, e.g. a git-backed workspace tolerates far less oversight); `0` = auto-approve (overloads the timeout knob with the never-ask semantics `allowUnattendedWrites` already owns — two ways to disarm the confirmation is how safety flags rot); a non-terminal timeout refusal (AFK user + retrying agent = unbounded confirm/timeout/refuse token treadmill, the retry loop class the 429 cooldown prevents) | Fail-closed on expiry is unchanged; terminality converts the dangerous loop into the bounded one — one refusal, agent stops, pending write surfaces in its report for the returning user; `0` = indefinite wait keeps a usually-present user from ever losing a write while burning zero tokens; the never-asked path remains the typed `allowUnattendedWrites` opt-out. Pinned by the §10 confirm-once/terminal-refusal unit case |
 | Auth lockout | Extension circuit breaker, 3 consecutive auth failures → degraded fail-fast; 429 with a correct token is a separate class — never counted toward the breaker, never retried, surfaced as a self-healing lockout refusal (the state is kernel-side and expires on its own, so no `/kb` recovery applies), and arms a **cooldown deadline** (now + `Retry-After`, floor 60 s) under which every kb tool call is refused locally with zero kernel round-trips — the structural counterpart to the breaker, so a retrying model cannot extend the lock; the refusal message says the token is probably correct, forbids token/settings edits and retries, and tells the model to report and pause; recovery = any `/kb` dispatch re-runs the full validation pass (settings re-read, probe, notebooks) and on success clears the breaker | Client-side never-retry alone (the agent's tool-call retry loop is the real retry loop); a message-only 429 refusal (a model that retries makes real kernel calls, each extending the lock — the "agent discipline" pattern the design rejects); restart-only recovery; counting 429s toward the breaker (a healthy session would degrade for another client's bad token) | The kernel locks the IP on the 6th consecutive failure in a 15-min window (locked-out requests themselves extend the lock — a model-paced retry loop can keep the whole VM locked out), shared with the access-auth path. The cooldown converts the dangerous loop into a harmless one (local time check, no lock extension) without expiry polling (any poll extends the lock), cross-restart persistence (kernel lock survives restart anyway; one bounded wasted call), or per-tool cooldowns. A sticky breaker without a re-read path would keep refusing after the token is fixed (settings are injected at construction); the `/kb` hook is user-typed and un-invocable by the agent, so it can never widen its own retry budget. The source-read throttle numbers (first lock 60 s = `30 << (6-5)`, second 120 s) are pinned by the §10 integration throttle case (§5 has the full record) |
 | Encrypted notebooks | Rejected at `session_start` validation (`encrypted: true` → KB rejected, named) | Warn-and-proceed | The SQL surface sees only the global `siyuan.db` — an encrypted KB's blocks are invisible to the title guard, verified-create's by-ID asserts, and the backlink check, so the §4 flow misfires (§5, §9) |
 | Tool surface for reconciliation | Write-back gains `delete` (block/doc) and `move` modes; `move` is cross-doc, intra-KB only (cross-KB reorganization is a UI hand-move, §6) — destination by `toDocId` (echoed, ownership-checked like every doc target) + optional `toHeadingId`, tool-fetched destination outline, tool-derived anchor across the doc boundary; result carries both outlines (`outline`/`destOutline`) + `movedBlockId` (ID preserved by `moveBlock` — never a fresh mint); `move doc: true` is the doc-level flavor via `/api/filetree/moveDocsByID` (`fromIDs` + `toID`, S1) — restructure/growth vehicle alongside nested `create` (`toDocId` omitted → un-nest to notebook root); tool-side self-descendant rejection because the kernel silently no-ops that move (`FilterMoveDocFromPaths`) | Defer reconciliation/restructure out of v1; insert-copy+delete for cross-doc moves (mints fresh IDs, orphans inbound refs — the no-whole-doc-rewrites hazard at block granularity) | §4's `duplicate` status and doc-tree restructuring are unreachable without them; still one tool, mode param; `moveBlock`/`moveDocsByID` preserve block IDs so provenance survives; a move touching two docs must echo both fresh outlines or the next chained write runs stale; after a doc-level move the doc is consumed by its echoed docId — the hpath echo is display only (R1) |
