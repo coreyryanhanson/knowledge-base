@@ -1326,8 +1326,9 @@ duplicate doc, never a silent clobber.
     always explicitly declared.
   - **Project vs global settings (decision record)**: pi's settings merge is a deep merge
     for plain objects but **replaces arrays wholesale** (project value wins, global array
-    gone — `settings-manager.ts` `isMergeableObject` excludes arrays). The config split
-    follows that grain instead of fighting it:
+    gone — observed in pi's `settings-manager.ts` `isMergeableObject`; a source-read,
+    no longer load-bearing now that the extension reads files per key, below). The config
+    split follows that grain instead of fighting it:
     - **Read path (pinned)**: pi exposes no settings API to extensions (`ExtensionContext`
       in `extensions/types.ts` carries no settings field), so the extension reads the
       settings files itself — and which file it reads *per key* is the enforcement
