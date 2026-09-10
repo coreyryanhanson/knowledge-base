@@ -581,7 +581,9 @@ for the identity property.
    **budgeted heading outline**
    (not a first-paragraph excerpt: with an exact title match the excerpts are identical
    by definition, so the actual judgment — content identity — needs the outline;
-   budgeted like §3's outline cap, spill-backed). The agent reconciles before any
+   budgeted like §3's outline cap, spill-backed). An inline body is draft-staged to
+   `stagedPath` on this stop too (guard-stop draft staging, below — the merge exit reuses
+   the staged file for the `append`/`replace-section` content). The agent reconciles before any
    write — edit/append onto the wanted docId, or `delete {docId, doc: true}` of the
    unwanted doc (write modes below); never append to whichever row SQLite returns
    first. The echoed docIds give `duplicate` its exit (R1), and the response message
@@ -613,6 +615,22 @@ for the identity property.
    — pass confirmNew: true to create anyway, or read an existing topic by docId and edit
    it`. Failure mode if the guard misses: two docs, reconcilable later — never a silent
    clobber.
+
+   **Guard-stop draft staging (decision record)**: a guard stop (`duplicate` or
+   `near_matches`) on a create whose body arrived **inline** stages the submitted
+   markdown to the session's spill dir as `draft-<sha256-16hex>.md` and returns the path
+   as `stagedPath` in the rejection payload, message: `body staged at <stagedPath> —
+   retry with markdownFile: '<stagedPath>'` — the retry re-enters the whole flow for ~25
+   tokens instead of re-transmitting the full draft (the pi-lean-host token-treadmill
+   class: long payloads + validator stop + inline retry = repeated full-payload
+   transmission). The staged file holds exactly the string the guard saw; the retry
+   re-reads it under the read-once-at-call-start pin (file-path input, above), so no new
+   race is introduced. Creates that already used `markdownFile` stage nothing (the file
+   is already on disk — `stagedPath` absent, message unchanged). No size threshold
+   (staging a 3-line body is cheaper than a knob to decide whether to), no cleanup (the
+   §3 no-cleanup spill posture covers it), deterministic name (same hash → same file, the
+   resumed-agent property). Upgrade path: extend staging to `confirm_timeout` write
+   refusals if resend frequency ever shows up on the write path.
 
    **`confirmNew` (decision record)**: the flag is **not declared in the write tool's
    input schema** — the agent learns it exists only from a `near_matches` rejection or
@@ -763,10 +781,25 @@ for the identity property.
      outline already rides the result.
 
 **Write-back tool schema (pinned)**: every call takes `kb` (exactly one name, §5), `mode`,
-and `markdown` (content-bearing modes only — `create`/`edit`/`replace-section`/`append`;
-meaningless on `delete`/`move`) — plus the mode-specific target: `create` takes `topic`
-(a **title** — mint policy above) and optional `parentId` (echoed docId →
+and a content-bearing body on `create`/`edit`/`replace-section`/`append` (meaningless on
+`delete`/`move`) — **`markdown` (inline string) XOR `markdownFile` (path to a prepared
+markdown file, decision record below)** — plus the mode-specific target: `create` takes
+`topic` (a **title** — mint policy above) and optional `parentId` (echoed docId →
 nested mint); **every other mode takes `docId`** (echoed target) instead of `topic`:
+
+**File-path input (decision record)**: `markdownFile` lets a large body travel by path
+(~25 tokens) instead of inline (a 500-line draft is the whole payload per call). The tool
+**reads the file once, at call start, and the captured string is what the entire flow —
+guard, write confirmation, kernel call, verification — operates on**; file edits between
+confirm and apply never apply (one sentence kills the whole mid-flow race class). Missing
+or unreadable file → structured `error` naming the path, **no kernel call fires** (the
+read is the call's first content step, before any guard query); passing both `markdown`
+and `markdownFile` (or neither, on a content-bearing mode) → shape-validation `error`.
+Trust posture matches §6's soft-scope ceiling: the path is agent-controlled in a
+single-user VM holding an admin token — pin "must exist, must be a regular file" and stop;
+no path allowlisting machinery. Inline `markdown` stays the primary path for normal-sized
+bodies; the file form is the escape valve for long drafts, and the two share one schema
+union, one read, and zero tool-side state.
 
 | mode | extra params | notes |
 |---|---|---|
@@ -1495,7 +1528,18 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - version-gated write refusal (probe failure must fail closed for writes; also covers
     a version mismatch from the pinned full version — the refusal path additionally has
     an honest integration form, below);
-  - the per-write-attempt first-write probe retry.
+  - the per-write-attempt first-write probe retry;
+  - file-path write input (§4 decision record) — a missing/unreadable `markdownFile` →
+    structured `error` naming the path with **no kernel call fired** (asserted on a
+    request log); `markdown` and `markdownFile` both present (or neither, on a
+    content-bearing mode) → shape-validation `error`; and the read-once capture: the
+    mocked flow mutates the file after the guard/confirm step and asserts the kernel
+    call and write confirmation operate on the string captured at call start;
+  - guard-stop draft staging (§4) — a `duplicate`/`near_matches` stop on an inline-body
+    create returns `stagedPath` under the session spill dir, the staged file's content
+    byte-equals the submitted markdown, the message names the `markdownFile` retry path;
+    a `markdownFile`-sourced create returns no `stagedPath` (nothing re-staged); a
+    non-guard stop (successful mint) leaves no draft file.
 - **Integration (opt-in)**: profile against the real host SiYuan (reachable from the dev VM);
   skipped by default so CI never needs SiYuan. **Setup asserts the running kernel version exactly equals the pinned version** — an accidental upgrade produces a red suite instead of silently unverified drift; the upgrade checklist is the deliberate path. **Upgrade checklist (the enforcement procedure the §2 strict write gate backs — the gate fires, this checklist is how the re-pin gets earned; a guard no process runs is not a guard)**: on every
   SiYuan upgrade, run the full integration profile against the new kernel *before*
@@ -1687,6 +1731,12 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     yields a diff of exactly one ID — pinning both the diff-based verification and the
     kernel's representative-ID choice against the real kernel (the return shape was not
     source-read, so this test owns the claim);
+  - guard-stop staging round-trip pin (§4): a large-body create stopped by the guard
+    (`near_matches` against a fixture doc), then retried with `markdownFile:
+    <stagedPath>` + `confirmNew: true`, mints successfully — and the doc's content read
+    back via `exportMdContent` matches the staged file's content (normalization aside,
+    the kernel-round-trip form of the unit suite's byte-equality pin); the staged file
+    lives in the session spill dir and needs no cleanup (§3 posture);
   - same-doc `move` result pin: a `move` whose `toDocId` names the source doc collapses to
     the standard shape — `outline` + `anchor`, no `destOutline`, `movedBlockId` present
     (the §4 result-shape rule keyed on whether the two docs differ);
@@ -1827,7 +1877,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Search transport | Named exception for `/api/search/fullTextSearchBlock` (`paths`-derived scoping + post-filter backstop) | SQL `content LIKE` only; full MCP transport | SiYuan's MCP server exposes `search.fulltext` as a supported agent-facing tool wrapping the identical kernel function — upstream support commitment by proxy; fallback if it breaks: SQL `LIKE` over documented `/api/query/sql` |
 | Delete safety | Backlink check before delete via documented SQL over the kernel's `refs` table (`SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)` — the `IN` set is the walk-enumerated delete set: target block, section walk, or whole-doc walk per mode) | Guess from outline; separate backlinks tool/endpoint | Zero new tool surface — `refs` is queryable through the same documented SQL endpoint; confirmation carries inbound-ref count + referring docs so the agent decides with refs in view |
 | Replace-section ref visibility | Delete-bearing writes (`replace-section`, block/doc `delete`) carry the same backlink visibility as any delete: the `refs` query rides the confirmation (count + referring doc hpaths) and the result echoes `invalidRefs` — the actually-orphaned count, post-write (§4) | Ref-preserving section rewrite (enumerate old blocks, parse the new body, pair by position/similarity, `updateBlock` survivors in place so their IDs — and inbound refs — survive; delete/insert only the true diff) | Pairing is a heuristic: a mismap silently rewrites the wrong block's content under a surviving ID, and the (still-valid) refs guarantee no signal — invisible corruption, strictly worse than the visible orphan class this fixes (`listInvalidBlockRefs` and the `invalidRefs` echo see orphans; nothing sees a mismap). Also N+ kernel calls vs two and more partial-failure states behind the no-bulk-transactions ceiling (§6). The doctrine is agent-decides-with-refs-in-view, so pre-write and post-write visibility is the fix — not ID preservation |
-| Write-back tool schema | Every call: `kb` (single name) + `mode` (+ `markdown` on content-bearing modes only); `create` takes `topic` (a title, R3) + optional `parentId`; every other mode takes `docId` (echoed target); block targets (`blockId`/`headingId`) agent-supplied, anchors (`previousID`/`nextID`/`parentID`) always tool-derived from the outline; `replace-section` is one tool call; every doc-targeting write result echoes the fresh heading outline, the resolved anchor, the new block ID, and the doc's root docId + stored title + real hpath (display) | Agent-supplied anchors (re-exposes the list-nesting trap the anchor rule avoids); multi-call replace-section (re-exposes the stale-enumeration hazard the insert-before-delete ordering avoids); post-write agent re-reads (a discipline rule that decays in long sessions — fresh-state-in-result cannot be forgotten) | Targets are data the tool already showed the agent; anchors are derived placement — conflating them is how an agent-supplied `previousID` lands a block inside a section-ending list; the docId echo is the input to every follow-up read/write/move (R1); riding the outline/anchor/newBlockId on the result makes chained writes re-read-free and the doc-end fallback visible at the moment it happens |
+| Write-back tool schema | Every call: `kb` (single name) + `mode` (+ `markdown` XOR `markdownFile` on content-bearing modes only — file input read once at call start, the captured string drives guard/confirm/kernel/verification, missing file → `error` before any kernel call); `create` takes `topic` (a title, R3) + optional `parentId`; every other mode takes `docId` (echoed target); block targets (`blockId`/`headingId`) agent-supplied, anchors (`previousID`/`nextID`/`parentID`) always tool-derived from the outline; `replace-section` is one tool call; every doc-targeting write result echoes the fresh heading outline, the resolved anchor, the new block ID, and the doc's root docId + stored title + real hpath (display) | Agent-supplied anchors (re-exposes the list-nesting trap the anchor rule avoids); multi-call replace-section (re-exposes the stale-enumeration hazard the insert-before-delete ordering avoids); post-write agent re-reads (a discipline rule that decays in long sessions — fresh-state-in-result cannot be forgotten); inline-only bodies (a 500-line draft re-transmits in full on every retry — the pi-lean-host token-treadmill class) | Targets are data the tool already showed the agent; anchors are derived placement — conflating them is how an agent-supplied `previousID` lands a block inside a section-ending list; the docId echo is the input to every follow-up read/write/move (R1); riding the outline/anchor/newBlockId on the result makes chained writes re-read-free and the doc-end fallback visible at the moment it happens; file input adds one schema union + one read and zero tool-side state — the filesystem is the staging area, symmetric with the output-side spill posture |
+| Guard-stop draft staging | On a `duplicate`/`near_matches` guard stop of a create whose body arrived inline, the tool writes the captured markdown to the session spill dir (`draft-<sha256-16hex>.md`) and returns `stagedPath` in the rejection payload; the retry carries `markdownFile: <stagedPath>` (~25 tokens) instead of re-transmitting the draft; `markdownFile`-sourced creates stage nothing; no size threshold; no cleanup (§3 spill posture); read-once capture carries over, so the staged file holds exactly what the guard saw | Inline retry with the full body (one duplicate transmission per guard stop — cheap once, a token treadmill in aggregate; the pi-lean-host long-API-guide precedent: repeated failed validator calls each re-sending the whole payload); tool-side draftRef staging with a lifetime and stale-draft semantics (new state + lifecycle for one resent string); requiring a check-before-draft tool (duplicates the guard, adds a round-trip to every create's happy path) | After file-path input exists, staging is one spill-helper call plus one field on an already-exceptional path — never the happy path; the merge exit (`append`/`edit` onto the echoed docId) reuses the staged file the same way; the deterministic hash name reuses the resumed-agent same-file property. Upgrade path: extend to `confirm_timeout` write refusals if resend frequency shows up there. Pinned by the §10 staging unit cases + integration round-trip |
 | Stale targets | Every insert-bearing write result is verified: `newBlockId` must appear in the fresh post-write block tree (the unfiltered `getChildBlocks` walk set — a heading-only outline can never evidence a paragraph insert), else `{status: error}` naming the vanished target with the outline attached; `edit` surfaces the kernel's synchronous not-found error verbatim; `delete` on a vanished target is accepted as a benign no-op with the unfiltered walk-ID set as evidence; `move` is verified like an insert — `movedBlockId` must appear in the destination's post-move walk set and be absent from the source's | Trust the kernel's HTTP result; post-write agent re-reads as a discipline rule | Verified against source at 3.8.2 (full per-op classification and evidence in §4): only `updateBlock` fails synchronously — vanished-target inserts and tree-level moves roll back silently behind `code: 0` (websocket-only error push), and `moveBlock`'s degenerate destinations skip silently but are unreachable by tool-derived anchors. §9's accepted concurrent-session race makes vanished targets reachable, and the assertions are free — the `getChildBlocks` walks the write-result contract already fetches carry the evidence (unfiltered ID sets, not rendered heading outlines) |
 | Multi-block markdown inserts | `newBlockId` is the kernel call's returned representative ID for a body that mints N block IDs; verification is a **walk-set diff** (post-write minus pre-write walk set — the pre-write set is already fetched for anchor derivation): the returned ID must appear in the diff, and a single-block body's diff must be exactly that one ID; for a multi-block body the result semantics are "one block of the appended content" — agents needing another fragment re-locate it via outline/`query` (echoed IDs, R1) | Membership-only verification of the returned ID (a one-of-N check passes while the walk set — which the contract already fetches — holds the evidence for the whole inserted subtree); asserting the *predicted* full ID set (predicts what the kernel mints from markdown — the R3 no-prediction doctrine, now with a markdown parser in the loop) | The write tool accepts arbitrary markdown and the kernel splits it into blocks; which ID a multi-block insert returns was not source-read, so the choice is pinned by the §10 multi-block case, not assumed — the same assumption-into-evidence move as the search-shape pin; the diff costs nothing (both walk sets are already in hand) and pins what actually landed, not what the kernel's first return value claims |
 | Discovery recency echo | Every discovery row — query SELECTs (include-`hpath` pattern, §5), search hits (echo contract, §3), and `duplicate`/`near_matches` candidate rows (§4) — carries `updated` (`yyyymmddhhmmss`, sorts lexically, no parsing); the echo is **data, not ordering** (kernel order and LIMIT behavior unchanged); doc-level recency reads the root row (`id = root_id`) or a `read`, since the value is per-block | Adding `ORDER BY updated DESC` to discovery (changes which rows survive LIMIT — a behavioral change disguised as an echo); deriving recency from hpath/session memory (no currency signal at all) | The reconciliation loop — "told X twice, the second version differs" — had no signal for which doc is current, leaving `duplicate`/`near_matches` judgments to a coin flip between echoed IDs; the column is free on both tools (query: a plain `blocks` column; search: the kernel FTS projections select `updated` verbatim and `fromSQLBlock` copies it through untruncated — `model/search.go:2479/:3094`, serialized per hit, `model/block.go:73`); root rows are `type='d'`, so their `updated` **is** doc-level — the §4 guard queries and `duplicate` rows already select roots. Pinned by the §10 recall-loop echo assertion (updated-echo leg) |
