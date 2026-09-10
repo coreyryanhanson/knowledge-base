@@ -1881,8 +1881,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Result budgets | Inline-cap + spill-to-temp; outline cap bounds rendering only | Byte-truncation; trusting kernel's `Search.Limit`; unbounded inline outlines | §3 |
 | Isolation | Soft (tool-level) | Hard (per-KB tokens/instances) | §6 |
 | Writes | Kernel API only; replace-first preference; identity-preserving ops; no whole-doc rewrites | Direct `.sy` access; removeDoc+recreate | §4, §7 |
-| Query scoping | Three layers: parser-certified `box IN (...)` injection (AST rebuild + re-parse verify), kernel `mode: "readonly"`, post-filter backstop | Post-filter only; hand-rolled token scanner; agent-supplied filter | §3, §10 |
-| SQL certification dependency | `node-sql-parser@5.4.0` exact-pinned in `pi-kb`; bump gated by §10 upgrade checklist | Hand-rolled scanner; coords-based text splice | §3, §10 |
+| Query scoping & certification | Three layers: parser-certified `box IN (...)` injection via `node-sql-parser@5.4.0` exact-pinned (AST rebuild + re-parse verify), kernel `mode: "readonly"`, post-filter backstop; parser bump gated by §10 checklist | Post-filter only; hand-rolled token scanner; agent-supplied filter; coords-based text splice | §3, §10 |
 | Search request shape | `paths: [<boxId>]` | A `boxes` JSON field | §3, §10 |
 | Agent-supplied query LIMIT | Passthrough uncapped; agent owns its budget | Clamping; rejecting large LIMITs | §3, §10 |
 | Multi-KB search fan-out | One kernel call per resolved KB, merged; per-call truncation accounting | One multi-`paths` call under one `pageSize`; raised `pageSize` | §3, §9, §10 |
