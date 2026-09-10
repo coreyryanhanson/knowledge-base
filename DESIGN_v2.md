@@ -1087,14 +1087,24 @@ duplicate doc, never a silent clobber.
 - **Write confirmation across modes (decision record)**: interactive sessions always
   confirm writes via `pi.ui.confirm`; sessions with no UI at all (`pi -p`) require
   `pi-kb.allowUnattendedWrites: true` (default false = default-deny: no UI ⇒ write
-  refused). **RPC mode (`pi --mode rpc`) has a working confirm path and is NOT headless
-  for this rule**: `ctx.ui.confirm` in RPC mode emits an `extension_ui_request`
-  (`method: "confirm"`) over stdout and blocks until the client answers with an
-  `extension_ui_response` (`confirmed: true/false`) — pi sets `ctx.hasUI: true` in RPC
-  mode precisely because the dialog methods are functional via that sub-protocol. The
-  extension therefore passes a **timeout on every confirm dialog**: a timeout expiry or
-  an explicit client cancellation auto-resolves to refused — fail-closed in every
-  direction, and never a deadlocked turn on a blocking dialog. The timeout value is the
+  refused). **RPC mode (`pi --mode rpc`) is NOT headless for this rule** (pi source-read,
+  deliberately not pinned by test): `ctx.ui.confirm` in RPC mode emits an
+  `extension_ui_request` (`method: "confirm"`) over stdout and blocks until the client
+  answers with an `extension_ui_response` (`confirmed: true/false`) — pi sets
+  `ctx.hasUI: true` in RPC mode because the dialog methods are functional via that
+  sub-protocol. The safety property does not rest on that source-read: **every confirm
+  carries a timeout and every non-answer — an ignored request, a dismissal, a thrown
+  dialog call, a timeout expiry — auto-resolves to refused**, so even if the
+  sub-protocol claim is wrong or drifts, an RPC write degrades to refused, never to
+  unattended writes. A live RPC integration pin was considered and cut: it would test
+  convenience, not safety — the dangerous direction (a write landing unconfirmed) is
+  fail-closed by the extension's own construction, and the only scenario that widens
+  the path is pi auto-answering `confirmed: true`, a harness bug no extension-side test
+  prevents. The sub-protocol behavior is checked once, manually, at first real RPC use
+  (§10 residual checklist). The extension therefore passes a **timeout on every
+  confirm dialog**: a timeout expiry or an explicit client cancellation auto-resolves
+  to refused — fail-closed in every direction, and never a deadlocked turn on a
+  blocking dialog. The timeout value is the
   **`pi-kb.writeConfirmTimeout`** setting (seconds, default 60 — pinned, not invented
   per implementer; this is the disruption-vs-oversight dial, so it is user-owned rather
   than a constant): `0` waits **indefinitely** (the dialog blocks the write until
@@ -1113,7 +1123,11 @@ duplicate doc, never a silent clobber.
   collapse to the same safety boundary: a full client (implements the UI sub-protocol)
   behaves like an interactive session with a remote confirm UI; a minimal client that
   ignores or dismisses the request yields `confirmed: false`/timeout ⇒ write refused —
-  degraded convenience, never a silent widening of the write path. The rejected-write message
+  degraded convenience, never a silent widening of the write path (this holds by
+  construction — timeout + non-answer ⇒ refused — so a wrong protocol read is visible
+  as refused writes, not as silent writes; the mocked §10 suite pins the extension's
+  fail-closed branches, and the sub-protocol itself gets the one manual check in the
+  §10 residual checklist). The rejected-write message
   names the enabling setting or the interactive path. Silence never grants unattended
   writes; the opt-out is typed, in settings. (A per-session confirmation toggle was
   considered and cut: `allowUnattendedWrites` already covers the only real opt-out —
@@ -1885,7 +1899,11 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   automation cannot reach — write-confirmation allow/refuse in a TTY session, status
   slot visibility, and the M4 real-KB exercise (recipes epub extraction) — folded into
   a residual checklist whose job shrinks from "prove recall works" to "prove the
-  interactive moments work".
+  interactive moments work". The checklist also covers the §5 RPC confirm record's one
+  manual check (the pi source-read deliberately left unpinned by test): at the first
+  real RPC-mode session, the confirm dialog appears, an explicit decline refuses the
+  write, and an ignored/dismissed dialog times out to `confirm_timeout` refused —
+  never an unattended write.
 
 ## 11. Milestone rollout
 
