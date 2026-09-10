@@ -1065,8 +1065,8 @@ duplicate doc, never a silent clobber.
   | Success (with `truncated`/`post_filtered` payload markers as applicable) | `ok` |
   | Guard stop — near-matches found | `near_matches` |
   | Guard stop — exact-title match(es) | `duplicate` |
-  | Kernel call failed or unreachable; verified-create/stale-target assertion failed; guard SQL errored | `error` |
-  | Every refusal: version gate, circuit breaker / 429 cooldown, scope or `kb`-param rejection, shape validation, headless write default-deny, write-confirmation decline or `confirm_timeout` | `refused` |
+  | Kernel call failed; verified-create/stale-target assertion failed; guard SQL errored; reads while the kernel is unreachable | `error` |
+  | Every refusal: version gate, circuit breaker / 429 cooldown, unreachable-kernel write refusal (failed probe retry), scope or `kb`-param rejection, shape validation, headless write default-deny, write-confirmation decline or `confirm_timeout` | `refused` |
 
   The `message` distinguishes causes within a class (the 429 cooldown and the breaker
   share `refused` since both mean "no kernel calls will pass" — the message names which).
@@ -1183,7 +1183,9 @@ duplicate doc, never a silent clobber.
   session-start probe self-heals once the kernel returns; no probe counter is kept, and a
   session whose startup probe succeeded never enters this path because the verdict is
   cached). Still strictly fail-closed: a successful probe must precede any write, and a
-  still-failed retry refuses only that write.
+  still-failed retry refuses only that write (`status: refused` — unreachable-write
+  refusal in the §5 status table; the agent should stop and report, not retry, since the
+  failed probe already consumed the write's one probe attempt).
 - **Auth-lockout circuit breaker (decision record)**: the kernel rate-locks IPs on the
   **6th consecutive auth failure within a 15-minute window** (fail counts ≤ 5 still pass —
   `util/session.go` `FailCount <= 5`; first lock 60 s, exponential to a 15 min max), and locked-out
