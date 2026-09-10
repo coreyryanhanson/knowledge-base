@@ -1032,20 +1032,30 @@ duplicate doc, never a silent clobber.
   2. **Kernel probe** — the §2 version gate, fail-closed for writes.
   3. **Notebook existence** via `lsNotebooks`: a stale notebook ID warns and drops that KB
      from the valid set (its calls get a rejection naming the problem), never a crash.
-     `lsNotebooks` also reports per-notebook encryption state (`encrypted`/`unlocked`,
+     `lsNotebooks` also reports per-notebook encryption state (`encrypted`, `unlocked`,
      `model/box.go`): a configured KB with `encrypted: true` is **rejected** at startup,
      naming the KB — `/api/query/sql` executes only against the global `siyuan.db`, so an
      encrypted notebook is invisible to the title guard, verified-create's by-ID asserts,
      and the backlink check; the §4 flow would misfire (the guard cannot see existing
      docs, so every create mints and verified-create then fails loud on a mint the SQL
      surface cannot see, while the delete backlink check silently reports zero refs) —
-     the one verified kernel behavior that
-     breaks the design's never-silently-wrong invariant (§9). (A *locked* encrypted notebook
-     never appears in `lsNotebooks` at all — the kernel skips locked boxes
-     (`model.IsBoxUnlocked`) — so it is dropped as a stale notebook ID with that warning
-     instead of the named encrypted rejection; both messages fail safe — the KB leaves
-     the valid set either way, so the flow never runs against a notebook the SQL surface
-     cannot see.)
+     the one kernel behavior that
+     breaks the design's never-silently-wrong invariant (§9), which is why the claim is
+     pinned live by the §10 encrypted-notebook case, not left a source-read.
+     **Locked and unlocked encrypted notebooks are one rejection, not two** (verified at
+     3.8.2): the `lsNotebooks` handler's `IsBoxUnlocked` check only skips the
+     request-holding loop for locked boxes (`api/notebook.go`) — `model.ListNotebooks()`
+     returns every box, locked encrypted ones included, with `encrypted: true`,
+     `unlocked: false`, `closed: true` (`model/box.go`). The `encrypted: true` flag is
+     therefore always present in `lsNotebooks` output regardless of lock state, so the
+     single rejection catches both — **no "locked → dropped as a stale notebook ID"
+     branch exists or should be built** (the earlier claim that the kernel skips locked
+     boxes from the listing was a misread; both encodings fail safe, but only the flag
+     check is real). Encryption is per-notebook — the kernel's
+     `/api/notebook/createEncryptedNotebook` mints one encrypted box with its own
+     per-box sqlcipher database while `createNotebook` stays unencrypted — so a mixed
+     workspace (one encrypted KB alongside plain KBs) is a normal, easily-constructed
+     state, not a degenerate one.
      This step is also where the token is first exercised — the `/api/system/version`
      probe is unauthenticated (connectivity only, §9), so an auth failure here
      (401/403) is counted by the circuit breaker (below) instead of surfacing later as
@@ -1457,7 +1467,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | UI rename / hand edits to KB docs | Medium (normal usage) | Safe by construction (§4 R5): identity is the docId, block IDs survive renames, and the doc stays reachable from any query row — every read/write by echoed docId works regardless of retitles. Worst case: a retitled doc no longer matches an agent's remembered mint title, so the next create by that title misses the guard — one reconcilable duplicate, never data loss (the accepted two-docs-reconcilable path). Write confirmation and result-echo keep it visible. No rename-detection machinery exists or is needed; no slug janitor exists (R5 — nothing to repair without a slug convention). |
 | Concurrent pi sessions on one KB | Normal usage, not degenerate | Two sessions can both pass the title guard before either create lands in the SQL index → duplicate topics; interleaved appends are last-writer-wins. Same "two docs, reconcilable later" blast radius as guard misses — never data loss. Verified-create is a by-ID mint assert (§4 R3), not a uniqueness check, so the race surfaces as a reconcilable duplicate, not an immediate error. A racing session's deletions also make stale targets reachable; the §4 stale-target record covers them — never a silent success against a vanished block. No cross-session locking in v1. |
 | SQL-index lag after write breaks find-then-write | Low | If the index lags, the title guard misses → create path → duplicate doc. Verified-create is now a **by-ID assert that proves mint success** (§4 R3), not a uniqueness check — it cannot make the guard→create race visible; that race's duplicate is the accepted reconcilable class (§6, §4 R4). The same lag applies to the advisory backlink checks — the pre-write confirmations and the `invalidRefs` echo (§4) — which is why they are evidence, not proof, and never a safety gate. The design's defense stays fail-loud where the kernel is silent and reconcilable-never-lossy elsewhere. §10's read-consistency test pins the sync-flush contract for `blocks` and `refs` alike. |
-| Encrypted KB notebook | Low (opt-in feature, rejected loudly at startup) | `/api/query/sql` sees only the global `siyuan.db`; an encrypted notebook's blocks are invisible to the title guard, to verified-create's by-ID asserts, and to the backlink check — the §4 flow would misfire (guard misses minting duplicates; verified-create then fails loud on a mint the SQL surface cannot see). §5 validation step 3 rejects any configured KB with `encrypted: true` at `session_start`, naming the KB, so the flow never runs against a notebook it cannot see. A *locked* encrypted notebook is skipped by `lsNotebooks` entirely and is dropped as a stale notebook ID instead — both messages fail safe (§5). |
+| Encrypted KB notebook | Low (opt-in feature, rejected loudly at startup) | `/api/query/sql` sees only the global `siyuan.db`; an encrypted notebook's blocks live in a separate per-box sqlcipher database and are invisible to the title guard, to verified-create's by-ID asserts, and to the backlink check — the §4 flow would misfire (guard misses minting duplicates; verified-create then fails loud on a mint the SQL surface cannot see). §5 validation step 3 rejects any configured KB with `encrypted: true` at `session_start`, naming the KB, so the flow never runs against a notebook it cannot see. Locked and unlocked encrypted notebooks surface identically: `lsNotebooks` reports `encrypted: true` with `unlocked: false` for locked boxes (verified at 3.8.2 — the kernel does not hide locked boxes from the listing), so the single flag check covers both states and no stale-ID drop branch exists. The `lsNotebooks` encryption-state source-read is pinned live by the §10 encrypted-notebook case, which runs on a disposable workspace — enabling the master-password key domain on the user's live workspace just to test would be deployment damage. |
 | Dual writer on the workspace | Low (user-controlled) | §7's serialization argument covers the kernel's own writes only; if the same workspace is also opened in a desktop SiYuan instance while the kernel runs, torn writes are back. Mitigation is deployment hygiene: one kernel per workspace; worth a note in the compose docs. |
 | Spill files accumulate in /tmp | Low (cosmetic) | No cleanup machinery (§3): hash-named files in per-session temp dirs, disk-bounded by spill frequency, wiped by the OS on reboot; crash or quit-then-resume leaves files the resumed transcript may quote — the agent re-queries and re-spills (same hash). A cleanup pass is a v2 add-on if /tmp usage ever matters. |
 
@@ -1546,6 +1556,11 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     project/global read path (global-only `kbs`/connection keys read from the global
     file specifically; project `defaultKBs` wins over global when present) and the
     token-failure branch);
+  - encrypted-notebook rejection (§5) — a mocked `lsNotebooks` response carrying an
+    `encrypted: true` row is rejected at `session_start` with the message naming the
+    KB, for **both** lock states (`unlocked: false` and `unlocked: true` — one branch,
+    the §5 one-rejection pin); a plain notebook row passes validation unchanged; no
+    kernel call from the encrypted KB's tools ever fires (the KB left the valid set);
   - error-envelope shape;
   - write-confirmation branches — allow/refuse; a cancelled confirm and a timed-out
     confirm both resolve to refusal (the §5 fail-closed direction; the confirm call
@@ -1816,6 +1831,21 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     case desyncs siyuan.db from blocktree.db until a reindex, so it runs **last** in the
     integration suite (after the auth-throttle pin has waited out the backoff) and follows the deletes with a kernel reindex (the same sanctioned
     rebuild SY-FORMAT.md §0.5 describes), bounding any leakage to its own run;
+  - encrypted-notebook contract pin (§5 — the startup rejection that guards the
+    never-silently-wrong invariant rests on a `model/box.go` source-read; this case
+    converts it into evidence): run against a **disposable workspace** (its own kernel
+    data dir), never the live one — `EnableEncryptedNotebook` establishes a
+    master-password key domain with one-way recovery semantics, and creating one on the
+    user's workspace just to test is deployment damage. Setup enables the feature, mints
+    one encrypted notebook via `/api/notebook/createEncryptedNotebook` and one plain
+    notebook, then asserts: `lsNotebooks` reports `encrypted: true` for the encrypted box
+    while unlocked **and** after it is locked again (kernel `LockBox` — `unlocked: false`;
+    the always-present-flag pin, and the live falsifier of the earlier claim that locked
+    boxes vanish from the listing — a kernel upgrade that starts hiding them turns this
+    red instead of the guard going blind); `session_start` validation rejects the
+    configured encrypted KB naming it while the plain KB validates clean; and no SQL
+    query from the extension ever targets the encrypted box. Teardown is workspace
+    disposal — no `removeNotebook` against encrypted boxes required.
   - search request shape: `paths`-derived scoping genuinely narrows results (guards the
     silently-ignored-field degradation, §3). **Run this case first among the integration
     tests** — it is the cheapest falsifier of a load-bearing assumption (the request shape
@@ -1907,7 +1937,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | replace-section ordering | Insert-before-delete | Delete-then-insert | §4 |
 | Write-confirmation timeout | `pi-kb.writeConfirmTimeout` (default 60 s; `0` = indefinite); timeout refusal `confirm_timeout` is terminal per write | Pinned constant; `0` = auto-approve; non-terminal timeout refusal | §5, §10 |
 | Auth lockout | Breaker at 3 consecutive auth failures; 429 is its own class with a local cooldown deadline | Message-only 429 refusal; counting 429s toward the breaker; restart-only recovery | §2, §5, §9, §10 |
-| Encrypted notebooks | Rejected at `session_start` validation | Warn-and-proceed | §5, §9 |
+| Encrypted notebooks | Rejected at `session_start` validation — one flag check, both lock states (`lsNotebooks` reports `encrypted: true` for locked boxes too) | Warn-and-proceed; a separate locked-box stale-ID drop branch | §5, §9, §10 |
 | Tool surface for reconciliation | `delete` + `move` modes (block/doc level); tool-fetched destination outline | Defer out of v1; insert-copy+delete for cross-doc moves | §4 |
 | Search transport | Named exception for `/api/search/fullTextSearchBlock` | SQL `content LIKE` only; MCP transport | §2, §3 |
 | Delete safety | Backlink check over the walk-enumerated delete set via documented SQL on `refs` | Guess from outline; separate backlinks tool | §4 |
