@@ -6,7 +6,7 @@ opinions.**
 
 Status: design complete — Milestone 0 (connectivity/auth smoke test, §11) is done, implementation
 starts at Milestone 1. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
-revisions agreed in design review (recorded in DESIGN-REVISIONS.md, decision records R1–R6).
+revisions agreed in design review (decision records R1–R6, Appendix).
 Provenance: decisions reached via a Socratic design interview plus adversarial review against
 GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan @ 3.8.2; the
 discovery doctrine anchored against ~/gbrain skills/query + MEMORY_VERBS_v1); rationale
@@ -141,7 +141,7 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
 **Why library-only for the core (decision record):**
 
 | Question | Why library, not a plugin |
-|---|---|
+| --- | --- |
 | Distribution | No npm publish → a second plugin surface has no distribution channel to exploit |
 | Context surface | A library contributes zero always-on tool tokens; a plugin adds a second tool wall |
 | Precedent | `pi-tool-masking` has no `pi.extensions` field — same shape, already validated |
@@ -173,7 +173,7 @@ Curated pi tools (one set, not per-KB):
    (all columns on every block row), so every discovery row carries the docId that `read`
    and the write modes consume, its per-row KB attribution, and its recency signal
    (doctrine, §4).
-2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Per-KB fan-out (decision record)**: the tool issues **one kernel call per resolved KB** (`paths: [<boxId>]`, the shared limit constant as `pageSize`) and merges the results — never one call with multiple `paths` entries under a single `pageSize`. The kernel takes one `pageSize` over the union of the boxes, so a single multi-KB call lets a hit-rich KB fill the entire pre-filter window while another active KB's in-scope matches are dropped pre-filter — invisible to both the post-filter backstop (it drops *out-of-scope* rows) and the truncation marker (it counts *post-filter* rows): the same silent-miss class the `paths`-shape pin guards, one layer deeper. Query has no such hole — `box IN (...)` filters inside SQLite before `LIMIT` applies — so fan-out is what restores recall parity between the two discovery tools. Semantics pinned: merged rows keep per-KB kernel order (no global relevance rank exists — kernel rows carry no scores); the truncation marker is computed per call and aggregated into the envelope (`truncated: N rows — truncated in 2 of 3 KBs`); a single active KB degenerates to exactly the single-call shape (zero change where the bug cannot exist). Cost: N kernel round-trips per search (N = active KBs, normally 1–2), counted by the existing throttle machinery (§9). Pinned by the §10 two-KB saturation case. **Echo contract (decision record)**:
+2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Per-KB fan-out (decision record)**: the tool issues **one kernel call per resolved KB** (`paths: [<boxId>]`, the shared limit constant as `pageSize`) and merges the results — never one call with multiple `paths` entries under a single `pageSize`. The kernel takes one `pageSize` over the union of the boxes, so a single multi-KB call lets a hit-rich KB fill the entire pre-filter window while another active KB's in-scope matches are dropped pre-filter — invisible to both the post-filter backstop (it drops *out-of-scope* rows) and the truncation marker (it counts *post-filter* rows): the same silent-miss class the `paths`-shape pin guards, one layer deeper. Query has no such hole — `box IN (...)` filters inside SQLite before `LIMIT` applies — so fan-out is what restores recall parity between the two discovery tools. Semantics pinned: merged rows keep per-KB kernel order (no global relevance rank exists — kernel rows carry no scores); the truncation marker is computed per call and aggregated into the envelope (`truncated: N rows — truncated in 2 of 3 KBs`); a single active KB degenerates to exactly the single-call shape (zero change where the bug cannot exist). Cost: N kernel round-trips per search (N = active KBs, normally 1–2), an armed cooldown refuses locally before any fan-out call is issued, so fan-out adds no lock-extension surface (§9). Pinned by the §10 two-KB saturation case. **Echo contract (decision record)**:
   every row echoes the full doc address — `id` (the matched block, kernel `id`),
   **`root_id`** (kernel `rootID` — a doc's root block ID *is* the `docId` `read` consumes),
   `hpath`, `box` mapped back to its resolved **KB name per row** (the extension built
@@ -555,7 +555,7 @@ title → same address across sessions" was never *identity* determinism; it is 
 of form for identical strings only, and LLMs paraphrase. The taxonomy, stated explicitly:
 
 | Agent variance across sessions | Mechanism that catches it |
-|---|---|
+| --- | --- |
 | ASCII casing | Title guard exact leg (`LIKE`, ASCII-case-insensitive) |
 | Shared prefix ("docker-networking" vs "docker-networks") | Near-match scan (prefix on title) |
 | Identical string containing HTML-special chars (`& < > " '`) | Guard exact leg matches via escape parity — the pattern is built from the HTML-escaped title (mint policy step 2), so these titles mint and match normally |
@@ -583,7 +583,7 @@ for the identity property.
    by definition, so the actual judgment — content identity — needs the outline;
    budgeted like §3's outline cap, spill-backed). An inline body is draft-staged to
    `stagedPath` on this stop too (guard-stop draft staging, below — the merge exit reuses
-   the staged file for the `append`/`replace-section` content). The agent reconciles before any
+   the staged file for the `append`/`edit` content). The agent reconciles before any
    write — edit/append onto the wanted docId, or `delete {docId, doc: true}` of the
    unwanted doc (write modes below); never append to whichever row SQLite returns
    first. The echoed docIds give `duplicate` its exit (R1), and the response message
@@ -624,7 +624,7 @@ for the identity property.
    tokens instead of re-transmitting the full draft (the pi-lean-host token-treadmill
    class: long payloads + validator stop + inline retry = repeated full-payload
    transmission). The staged file holds exactly the string the guard saw; the retry
-   re-reads it under the read-once-at-call-start pin (file-path input, above), so no new
+   re-reads it under the read-once-at-call-start pin (file-path input record, below), so no new
    race is introduced. Creates that already used `markdownFile` stage nothing (the file
    is already on disk — `stagedPath` absent, message unchanged). No size threshold
    (staging a 3-line body is cheaper than a knob to decide whether to), no cleanup (the
@@ -802,7 +802,7 @@ bodies; the file form is the escape valve for long drafts, and the two share one
 union, one read, and zero tool-side state.
 
 | mode | extra params | notes |
-|---|---|---|
+| --- | --- | --- |
 | `create` | optional `parentId` (echoed docId → nested mint, R3), optional `confirmNew` — **not declared in the tool's input schema** (discovered only via rejection/duplicate response messages, §4 decision record) | flows through flow steps 1–2 (title guard: exact leg + near-match scan) and mint-policy step 4 (verified-create); `confirmNew: true` bypasses the entire guard — both legs, including an exact-title match (a flagged re-mint is a conscious duplicate, the reconcilable class) — write confirmation and verified-create still apply |
 | `edit` | `docId`, `blockId` | `docId` scopes and targets the doc (ownership query); `blockId` is an agent-supplied *target*, read off the inline outline or the `query` tool; a target is not an anchor — `previousID`/`nextID`/`parentID` anchors stay tool-derived (above) |
 | `replace-section` | `docId`, `headingId` | one tool call — the tool enumerates → inserts → deletes internally (above) |
@@ -923,7 +923,7 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   membership) is what keeps the evidence honest when the kernel mints several blocks
   from one call.
 
-**`invalidRefs`** — every delete-bearing write (`replace-section`, block-level
+- **`invalidRefs`** — every delete-bearing write (`replace-section`, block-level
   `delete`, doc-level `delete`) echoes the orphan outcome: the count of distinct
   referring root docs whose refs point into the walk-enumerated delete set, queried
   through the same documented SQL endpoint as the pre-write confirmation check (§4
@@ -1044,12 +1044,29 @@ duplicate doc, never a silent clobber.
      cannot see.)
      This step is also where the token is first exercised — the `/api/system/version`
      probe is unauthenticated (connectivity only, §9), so an auth failure here
-     (401/403) engages the circuit breaker (below) instead of surfacing later as
+     (401/403) is counted by the circuit breaker (below) instead of surfacing later as
      per-call failures.
 - **Error surface (decision record)**: every tool result carries one envelope,
-  `{status: ok | near_matches | duplicate | truncated | error | refused, message, ...payload}` — one
-  shared helper; the model reads `status` mechanically and `message` for detail. The
-  version-refusal message is static text naming the kernel version, the pinned version,
+  `{status: ok | near_matches | duplicate | error | refused, message, ...payload}` — one
+  shared helper; the model reads `status` mechanically and `message` for detail.
+  **`truncated` and `post_filtered` are payload markers, never status values (decision
+  record)**: a near-match scan capped at its 20-row limit (§4) must signal both the
+  guard stop (`near_matches`) and the cap (`truncated` marker in the payload) — one
+  status value cannot carry both, so the status classifies the call's outcome and the
+  markers ride the payload (a truncated query result is `status: ok` plus the marker).
+  Status classes are pinned — the implementer never assigns them per call:
+
+  | Situation | Status |
+  | --- | --- |
+  | Success (with `truncated`/`post_filtered` payload markers as applicable) | `ok` |
+  | Guard stop — near-matches found | `near_matches` |
+  | Guard stop — exact-title match(es) | `duplicate` |
+  | Kernel call failed or unreachable; verified-create/stale-target assertion failed; guard SQL errored | `error` |
+  | Every refusal: version gate, circuit breaker / 429 cooldown, scope or `kb`-param rejection, shape validation, headless write default-deny, write-confirmation decline or `confirm_timeout` | `refused` |
+
+  The `message` distinguishes causes within a class (the 429 cooldown and the breaker
+  share `refused` since both mean "no kernel calls will pass" — the message names which).
+  The version-refusal message is static text naming the kernel version, the pinned version,
   and the fix (run the §10 upgrade checklist against the new kernel, re-pin, then start
   a new session) — under the strict full-version gate (§2) this is the one message that
   fires on any upgrade.
@@ -1362,7 +1379,7 @@ duplicate doc, never a silent clobber.
 ## 6. Named ceilings (deliberate simplifications)
 
 | Ceiling | What it means | Upgrade path |
-|---|---|---|
+| --- | --- | --- |
 | Soft scope only | The api token is a workspace-admin credential (the only kind SiYuan issues); KB isolation is tool-level filtering to keep other KBs out of context, not a security boundary against a hostile actor. Anything holding the token — agent or otherwise — can touch the whole workspace. | Separate SiYuan instances, if hard isolation is ever genuinely needed. (No per-KB or read-only tokens exist in SiYuan's auth model.) |
 | Agent-trust on writes | Write tools touch real notebooks. | Interactive write confirmation (v1) + KB-notebook blast radius; tighter permissioning later if trust proves unwarranted. |
 | Lean loop, no RAG (v1) | Recall depends on the model re-querying via SQL/search, not embeddings. RAG is planned v2 work, sequenced after the lean loop ships — not a contingency awaiting a shortfall measurement. | Add a RAG layer as an external sidecar fed by `exportMdContent`/`query/sql`, never a second writer (GBrain precedent: its vectors/graph live in its own Postgres sidecar, not the storage format). v1's embedding-free construction is what makes the sidecar a clean add. |
@@ -1411,7 +1428,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 ## 9. Risks
 
 | Risk | Likelihood | Mitigation |
-|---|---|---|
+| --- | --- | --- |
 | VM→host connectivity fails | ~~Unknown~~ **Resolved** — smoke test passed (Milestone 0) | Was compose/firewall fix; not an architecture problem. |
 | Unauthenticated workspace access (deployment drift) | ~~Unknown~~ **Resolved** — auth posture verified (Milestone 0) | Non-empty access auth code keeps the anonymous-admin bypass dead; API-token matrix (no-token → rejected, bogus → rejected, real token → `code:0` on guarded + SQL endpoints) passed from the VM. `/api/system/version` has no auth middleware and proves connectivity only — guarded endpoints must be probed when re-verifying. |
 | Auth lockout from agent retry loops | Medium (model tool-retry loops are common) | Extension circuit breaker: 3 consecutive auth failures → degraded fail-fast (§5), under the kernel's lock threshold (6th consecutive failure within a 15-min window); the client never retries 401/403/429 (§2). A 429 with a correct token (lock tripped by a concurrent session or client) is surfaced as the self-healing 429 refusal — never counted toward the breaker, never retried (§5) — and arms a cooldown deadline (now + `Retry-After`, floor 60 s): further kb tool calls are refused locally with zero kernel round-trips, so a retrying model cannot extend the lock (§5). The source-read throttle contract (threshold, window, backoff, `Retry-After`, lock-extension, self-heal) is pinned by the §10 integration throttle case (§5 has the full record). Multi-KB search fan-out (§3) multiplies per-call round-trips by the active-KB count (normally 1–2); an armed cooldown refuses locally before any fan-out call is issued, so it adds no lock-extension surface. |
@@ -1824,7 +1841,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 ## 11. Milestone rollout
 
 | # | Milestone | Gate |
-|---|---|---|
+| --- | --- | --- |
 | 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
 | 1 | Repo scaffold — monorepo or two dirs, `siyuan-core` package skeleton, settings schema | `vitest` runs green on trivial test |
 | 2 | `siyuan-core` client — typed endpoints, auth, version check, mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists (the *tool-path* case lands with the extension at M3); the **auth-throttle contract pin** included, ordering per §10; **search `paths`-shape pin runs first** — cheapest falsifier, guards the silent whole-workspace-degradation failure mode §3 search-scoping rests on; a no-code precursor — two `curl` calls from the host — can run before any client code exists) |
@@ -1836,7 +1853,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 ## Appendix — decision ledger
 
 | Decision | Choice | Rejected alternative | Key rationale |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Sharing model | Local symlink/`file:`, no npm publish | npm publish | No versioning tax; general code anyway |
 | Core package shape | Library-only, zero pi imports | Core as second pi plugin | Zero context surface; no distribution channel to exploit; pi-tool-masking precedent |
 | Transport | Kernel HTTP API | MCP bridge to SiYuan's `/mcp` | Simpler, no SDK; both paths use the same admin token, MCP adds protocol overhead with no capability |
@@ -1855,7 +1872,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | User edits (R5) | UI renames and hand edits to KB docs are safe by construction — identity is the docId; no hand-rename advisory or rename-detection machinery; `/kb fix-slugs` and the `fix-` prefix reservation do not exist (nothing to repair without a slug convention); `all` stays reserved (its consumer survives) | Keeping fix-slugs for title hygiene (no slug convention left to enforce) | A rename's worst case is the accepted two-docs-reconcilable path — one guard miss, reconcilable, never data loss; block IDs and docIds survive renames untouched |
 | Settings parent key | Single `pi-kb` parent key (= package name), full shape pinned in §5 | Bare `kb` parent key; flat per-KB keys | Namespace collisions with other extensions; `defaultKBs` needs an array to reference |
 | Project/global config split | `kbs` + connection settings global-only; `defaultKBs` settable at both levels (array-replace = intended semantics); absent key = empty active set (no implicit activate-all) | Projects re-declaring the full `kbs` array; extension-defined array composition; absent = activate-all (silently widens write blast radius when KBs are added) | pi replaces arrays wholesale in settings merge (`isMergeableObject`); notebook IDs in one place can't go stale in two; project scope intent stays per-project; blast radius is always explicitly declared |
-| Error surface | `{status, message}` envelope on every tool result | Free-text with fixed prefixes | near_matches/truncated already structured; one shared helper; refusals always name the fix |
+| Error surface | `{status, message}` envelope on every tool result; status classes pinned (outcome-classifying: `ok`/`near_matches`/`duplicate`/`error`/`refused`), `truncated`/`post_filtered` are payload markers never statuses — a capped guard stop must carry `near_matches` *and* the truncation marker simultaneously | Free-text with fixed prefixes; `truncated` as a sixth status value (one status cannot carry a guard stop and its cap at once) | One shared helper; refusals always name the fix; implementers never assign status per call — the §5 decision table does |
 | Headless writes | Default-deny; enabled by `pi-kb.allowUnattendedWrites: true`; interactive sessions always confirm (no per-session toggle); RPC (`--mode rpc`) is not headless — its confirm dialog works via the extension UI sub-protocol, with a timeout so a non-responding client auto-refuses (§5); untrusted content must enter via files/tools, never interpolated into headless prompt strings — prompt text dispatches `/kb` (§5 residual, §9) | Default-allow headless; CLI flag; per-session toggle chat state | Unattended writes require a typed opt-in; settings is the only escape hatch headless can reach; a toggle adds convenience, not capability; the confirm timeout keeps every RPC client shape fail-closed (cancelled/timeout ⇒ refused, never a hang, never a silent allow) |
 | Spill files | `os.tmpdir()/pi-kb/<session-id>/`, `{tool}-{sha256-16hex}` (`.jsonl` for row and outline spills, `.md` for raw read spills), 8000-char preview; **no cleanup machinery** — files persist until OS reboot | TSV rows; task-hash names; flat shared dir; terminal-shutdown cleanup | Lossless, self-describing, still line-greppable; content-hash dedupes; per-session dir avoids cross-session interference without tracking; no cleanup means no unsafe-delete bug class (`session_shutdown` fires on resume/fork, where the transcript still quotes spill paths) and no terminal-shutdown definition to pin — accumulation is cosmetic and reboot-bounded |
 | Recall test | **Automated headless harness** (§10): nonce-planted fact, kernel-side plant assert, fresh-session recall with transcript-proven tool use, negative control (delete → must-not-recall) | Manual click-through only (a human cannot distinguish kernel-sourced recall from chat-context reconstruction — the exact failure class the product exists to prevent — and a demo proves nothing about regressions); full UI automation of interactive moments | `pi -p` runs extension commands (verified, §5); the nonce makes a context-sourced false positive structurally impossible, not merely unlikely; the negative control converts "the harness detects sourcing" from assumption into evidence — the same move as the search-shape and throttle pins; interactive-only moments (confirmation dialogs, status slot) stay manual because headless cannot exercise them |
@@ -1889,7 +1906,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 ## Reference material (local checkouts)
 
 | Path | What it informs here |
-|---|---|
+| --- | --- |
 | `~/siyuan/` | SiYuan source — kernel API surface (§2, §3), `.sy`/torn-write behavior (§7), compose/deployment (§8) |
 | `~/gbrain/` | GBrain methods — lean loop, entity/source separation, zero-key mode (§1, §3, §4, §6); `skills/query` SKILL.md + `MEMORY_VERBS_v1` — the discovery-doctrine anchor for the R1/R2/R6 addressing revision (search discovers, read consumes confirmed targets only) |
 | `~/pi/` | pi harness — extension API, `session_start`/`appendEntry`, settings.json (§2, §5) |
