@@ -67,30 +67,25 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
 - Pure SiYuan kernel HTTP API client + TypeScript types.
 - **Zero pi imports, zero runtime dependencies** (native `fetch`, hand-rolled types).
 - URL + token injected via config (never hardcoded — the deployment topology requires it).
-- Version check (`/api/system/version`) against a pinned, tested SiYuan version. **Timing**
-  (decision record): the probe runs eagerly at `session_start` and the verdict is cached
-  for the session — no write ever executes before a probe has succeeded. **Fail-closed**:
-  probe failure (unreachable, error) also refuses writes — "never probed successfully"
-  means no writes, whatever the reason; reads are never version-gated — the gate exists
-  for the write blast radius only, so a mismatch (or a failed probe) leaves reads
-  untouched, and the unreachable-kernel behavior §5 pins is a separate per-call
-  degradation, not a second gate. The probe is a **correctness gate, not a security gate**: `/api/system/version` is unauthenticated, so it proves connectivity and version only — auth enforcement for writes lives kernel-side. **Mismatch
-  behavior**: **refuse writes on any drift from the pinned full version** (writes are
-  the blast radius); reads warn and proceed either way. Strict, not coarse (decision
-  record, revised after external review): the earlier draft refused only on *major*
-  drift to avoid breaking the extension on every SiYuan point release — but §8 pins the
-  compose image tag, so an upgrade is always a deliberate act and never arrives as a
-  background point release, while every behavior-drift case this design records landed
-  in *minor* releases (duplicate-minting create in v3.7.0; all kernel pins verified at
-  3.8.2) — a major-only gate would never fire against the drift class it exists for.
-  Strict matching fires the gate at exactly the moment the deliberate upgrade happens —
-  when the §10 upgrade checklist should run — making the §10 integration suite the
-  *verification* step of that upgrade rather than an unenforced drift guard. No
-  *automatic* staleness re-probe exists, so a mid-session kernel version swap is out of
-  threat model; the §5 recovery hook (every `/kb` dispatch re-runs the probe) is
-  user-invoked and incidentally refreshes the verdict — it is not staleness polling. The
-  first-write probe retry when no probe has yet succeeded is specified with the
-  unreachable-startup flow (§5).
+- Version check (`/api/system/version`) against a pinned, tested SiYuan version
+  (decision record; ledger row "Version gate"). **Timing**: eager probe at
+  `session_start`, verdict cached for the session — no write executes before a probe
+  has succeeded, and probe failure (unreachable, error) also refuses writes
+  (fail-closed: "never probed successfully" means no writes). Reads are never
+  version-gated — the gate exists for the write blast radius only; the unreachable-kernel
+  per-call degradation §5 pins is a separate mechanism, not a second gate. The probe is
+  a **correctness gate, not a security gate**: `/api/system/version` is unauthenticated
+  (connectivity and version only); write auth enforcement lives kernel-side.
+  **Mismatch behavior**: refuse writes on any drift from the pinned full version; reads
+  warn and proceed. **Strict, not major-only** (revised after external review): every
+  behavior-drift case this design records landed in a *minor* release (duplicate-minting
+  create in v3.7.0), so a major-only gate would never fire on the drift class it exists
+  for — and §8's pinned compose tag makes upgrades deliberate, so strict matching fires
+  exactly when the §10 upgrade checklist should run. No *automatic* staleness re-probe
+  exists (a mid-session version swap is out of threat model); the §5 recovery hook's
+  per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict — it is not
+  staleness polling. The first-write probe retry when no probe has yet succeeded is
+  specified with the unreachable-startup flow (§5).
 - Query/search methods take explicit `limit` parameters — the kernel API is
   called exactly as the caller specifies; result-budget policy belongs to the extension
   (§3), not the client. Exception: the query method takes `stmt` plus the read-only `mode` flag (§2's second
@@ -882,10 +877,12 @@ itself or into its own subtree, the same tool-side pre-check the doc-level move 
 against `FilterMoveDocFromPaths`. The §10
 integration suite pins all four behaviors against the real kernel.
 
-**Write-result contract (pinned)**: every doc-targeting write result carries three fields
-alongside the envelope, all built from data the write flow already has in hand — the only
-added round-trip is the outline fetch (documented `getChildBlocks`, the same call the
-§3 `read` outline uses, same spill budget, same helper). Every create and write result
+**Write-result contract (pinned)**: every doc-targeting write result carries the fields
+below — `outline`/`anchor`/`newBlockId` on every result that has a doc to outline,
+`invalidRefs` on delete-bearing writes — all built from data the write flow already has
+in hand; the only added round-trip is the outline fetch (documented `getChildBlocks`, the
+same call the §3 `read` outline uses, same spill budget, same helper). Every create and
+write result
 additionally echoes the doc's **root `docId`, stored title, and real `hpath`** from the
 root row — the docId is the echoed target R1 requires and the input to
 every follow-up read/write/move; title and hpath are display only, not an address:
@@ -937,8 +934,9 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   doc-level `delete` (no doc left to outline) still carries it — the refs query rides
   the pre-delete walk set, not the vanished doc.
 
-`delete` with `doc: true` carries none of the three (no doc left to outline, and no root
-row left to echo); doc-level
+`delete` with `doc: true` carries none of `outline`/`anchor`/`newBlockId` (no doc left
+to outline, no anchor to place, no root row left to echo) — only `invalidRefs`, queried
+over the pre-delete walk set (§4 `delete` mode); doc-level
 `move` carries `outline` + the stored-title/`hpath` echo but no `anchor`/`newBlockId`/`destOutline` (§4
 doc-level decision record); block-level `delete`, `move`, and `edit` results carry the
 outline (edit/move also the other fields where applicable).
