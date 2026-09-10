@@ -564,10 +564,22 @@ for the identity property.
    runs the guard's exact leg. **More than one row** (a normal kernel-created state —
    same-titled siblings are creatable in the UI, and the guard→create race can produce
    one) → `duplicate`
-   status: return all rows (docId, title, first paragraph) and let the agent reconcile
-   before any write — reconciliation is a `delete {docId, doc: true}` of the unwanted doc
-   (write modes below); never append to whichever row SQLite returns first. The echoed
-   docIds give `duplicate` its exit (R1).
+   status: return all rows — docId, title, and each doc's **budgeted heading outline**
+   (not a first-paragraph excerpt: with an exact title match the excerpts are identical
+   by definition, so the actual judgment — content identity — needs the outline;
+   budgeted like §3's outline cap, spill-backed). The agent reconciles before any
+   write — edit/append onto the wanted docId, or `delete {docId, doc: true}` of the
+   unwanted doc (write modes below); never append to whichever row SQLite returns
+   first. The echoed docIds give `duplicate` its exit (R1), and the response message
+   names all of them: reconcile by docId, or pass `confirmNew: true` to mint a
+   conscious second doc (decision record below). The outline rides the rows because
+   the judgment this stop exists for — *is the existing doc the same topic as what
+   the agent is about to write?* — cannot be settled by the title (it matched) or by
+   the excerpt (identical by definition); byte-identical titles are legitimately
+   different docs ("John Smith", the engineer vs. the biologist — same-titled
+   siblings are creatable in the UI, and R4 concedes identity was never solvable
+   syntactically). A sparse or empty stub surfaces as an empty outline — itself the
+   identity signal.
 2. **No exact row** → near-match scan (space/hyphen/underscore prefix variants on the title, above;
    `%`/`_` escaped in the fragments so a title like `100%_devops` can't widen the scan;
    fragments are built from the HTML-escaped title, same parity as the exact leg;
@@ -586,6 +598,24 @@ for the identity property.
    — pass confirmNew: true to create anyway, or read an existing topic by docId and edit
    it`. Failure mode if the guard misses: two docs, reconcilable later — never a silent
    clobber.
+
+   **`confirmNew` (decision record)**: the flag is **not declared in the write tool's
+   input schema** — the agent learns it exists only from a `near_matches` rejection or
+   a `duplicate` response message, so speculative/habitual flagging cannot form before
+   the first collision (an agent that passes flags preemptively would otherwise disarm
+   the guard on every create). When passed, it bypasses the **entire guard — both
+   legs, including an exact-title match**. An exact match can be a legitimate new doc
+   (byte-identical titles ≠ identical topics, above), the agent has just seen the
+   existing doc's content, and content identity is exactly the judgment call the tool
+   cannot make for the agent — so the agent, deciding with data in view, is the right
+   layer. A flagged re-mint of an exact match is a **conscious duplicate**: two
+   same-titled docs, the accepted reconcilable class — the failure mode of a wrong
+   judgment is a visible duplicate the user merges, never silent clobbering. What the
+   flag does NOT bypass: the write confirmation and verified-create (§4 R3) — a
+   flagged create is still a verified mint. The near-match candidates keep
+   first-paragraph excerpts rather than outlines (up to 20 rows — excerpts scan
+   cheaply; the outline upgrade is reserved for the exact-leg stop, where rows are
+   few and excerpts are worthless).
 3. **Found** → return the doc's root docId, outline + block IDs (with content), and let
    the agent pick the write mode — the target for that write is the echoed docId, never
    the title (R1). **Anchor ownership (decision record)**: the tool derives all block
@@ -725,7 +755,7 @@ nested mint); **every other mode takes `docId`** (echoed target) instead of `top
 
 | mode | extra params | notes |
 |---|---|---|
-| `create` | optional `parentId` (echoed docId → nested mint, R3), optional `confirmNew` | flows through flow steps 1–2 (title guard: exact leg + near-match scan) and mint-policy step 4 (verified-create); `confirmNew: true` skips the guard after a `near_matches` rejection — write confirmation and verified-create still apply |
+| `create` | optional `parentId` (echoed docId → nested mint, R3), optional `confirmNew` — **not declared in the tool's input schema** (discovered only via rejection/duplicate response messages, §4 decision record) | flows through flow steps 1–2 (title guard: exact leg + near-match scan) and mint-policy step 4 (verified-create); `confirmNew: true` bypasses the entire guard — both legs, including an exact-title match (a flagged re-mint is a conscious duplicate, the reconcilable class) — write confirmation and verified-create still apply |
 | `edit` | `docId`, `blockId` | `docId` scopes and targets the doc (ownership query); `blockId` is an agent-supplied *target*, read off the inline outline or the `query` tool; a target is not an anchor — `previousID`/`nextID`/`parentID` anchors stay tool-derived (above) |
 | `replace-section` | `docId`, `headingId` | one tool call — the tool enumerates → inserts → deletes internally (above) |
 | `append` | `docId`, optional `headingId` | omitted → doc end (`appendBlock` on the doc root); with a heading → tool derives the `nextID` anchor from the outline |
@@ -1310,7 +1340,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     title, with `%`/`_` LIKE-escaped so they can't widen the scan), the space/hyphen/underscore
     prefix-variant scan (`docker-networking` vs `docker\_networking` matches the third leg),
     the 20-row candidate cap and its `truncated` marker, and the
-    `confirmNew` skip path (guard fires without it, create proceeds with it); mint-policy
+    `confirmNew` skip path (guard fires without it; with it, create proceeds past
+    **both** legs — including an exact-title match — and the param is absent from the
+    tool's declared input schema, §4 decision record); mint-policy
     rejections — empty after trim, `/` in title, >512 runes, and tab/newline/control
     characters (each with the rephrase-hint message);
   - verified-create by-ID asserts (§4 R3) — top-level identity assert; nested assert
@@ -1436,8 +1468,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     ghost (drop the ghost subtree in teardown);
   - duplicate-disambiguation case (§4 R1 — `duplicate` must have its exit): two
     same-titled docs in one fixture (UI-created) → create with that title → `duplicate`
-    rows with docIds → `delete {docId, doc: true}` on one → re-create hits the guard's
-    exact leg and one doc remains;
+    rows carrying the budgeted heading outline (not just excerpts — §4 flow step 1)
+    → re-create with `confirmNew: true` → a third same-titled doc mints (the
+    conscious-duplicate path, §4 decision record) → `delete {docId, doc: true}` on two
+    → re-create without the flag hits the guard's exact leg and one doc remains;
   - verified-create, split into two cases (the kernel mints a duplicate on
     create-on-existing-path, §4, so one test cannot assert both layers):
     *kernel-contract pin* — a raw second `createDocWithMd` on an existing path →
@@ -1709,6 +1743,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Replace-section ref visibility | Delete-bearing writes (`replace-section`, block/doc `delete`) carry the same backlink visibility as any delete: the `refs` query rides the confirmation (count + referring doc hpaths) and the result echoes `invalidRefs` — the actually-orphaned count, post-write (§4) | Ref-preserving section rewrite (enumerate old blocks, parse the new body, pair by position/similarity, `updateBlock` survivors in place so their IDs — and inbound refs — survive; delete/insert only the true diff) | Pairing is a heuristic: a mismap silently rewrites the wrong block's content under a surviving ID, and the (still-valid) refs guarantee no signal — invisible corruption, strictly worse than the visible orphan class this fixes (`listInvalidBlockRefs` and the `invalidRefs` echo see orphans; nothing sees a mismap). Also N+ kernel calls vs two and more partial-failure states behind the no-bulk-transactions ceiling (§6). The doctrine is agent-decides-with-refs-in-view, so pre-write and post-write visibility is the fix — not ID preservation |
 | Write-back tool schema | Every call: `kb` (single name) + `mode` (+ `markdown` on content-bearing modes only); `create` takes `topic` (a title, R3) + optional `parentId`; every other mode takes `docId` (echoed target); block targets (`blockId`/`headingId`) agent-supplied, anchors (`previousID`/`nextID`/`parentID`) always tool-derived from the outline; `replace-section` is one tool call; every doc-targeting write result echoes the fresh heading outline, the resolved anchor, the new block ID, and the doc's root docId + stored title + real hpath (display) | Agent-supplied anchors (re-exposes the list-nesting trap the anchor rule avoids); multi-call replace-section (re-exposes the stale-enumeration hazard the insert-before-delete ordering avoids); post-write agent re-reads (a discipline rule that decays in long sessions — fresh-state-in-result cannot be forgotten) | Targets are data the tool already showed the agent; anchors are derived placement — conflating them is how an agent-supplied `previousID` lands a block inside a section-ending list; the docId echo is the input to every follow-up read/write/move (R1); riding the outline/anchor/newBlockId on the result makes chained writes re-read-free and the doc-end fallback visible at the moment it happens |
 | Stale targets | Every insert-bearing write result is verified: `newBlockId` must appear in the fresh post-write block tree (the unfiltered `getChildBlocks` walk set — a heading-only outline can never evidence a paragraph insert), else `{status: error}` naming the vanished target with the outline attached; `edit` surfaces the kernel's synchronous not-found error verbatim; `delete` on a vanished target is accepted as a benign no-op with the unfiltered walk-ID set as evidence; `move` is verified like an insert — `movedBlockId` must appear in the destination's post-move walk set and be absent from the source's | Trust the kernel's HTTP result; post-write agent re-reads as a discipline rule | Verified against source at 3.8.2 (full per-op classification and evidence in §4): only `updateBlock` fails synchronously — vanished-target inserts and tree-level moves roll back silently behind `code: 0` (websocket-only error push), and `moveBlock`'s degenerate destinations skip silently but are unreachable by tool-derived anchors. §9's accepted concurrent-session race makes vanished targets reachable, and the assertions are free — the `getChildBlocks` walks the write-result contract already fetches carry the evidence (unfiltered ID sets, not rendered heading outlines) |
+| `confirmNew` escape hatch | Hidden from the tool's input schema (discovered only via rejection/duplicate response messages); when passed it bypasses the **entire** title guard — both the exact leg and the near-match scan; write confirmation and verified-create still apply; `duplicate` rows carry the budgeted heading outline (exact-match excerpts are identical by definition, so the identity judgment needs content) | Always-declared optional param (speculative flagging disarms the guard before any collision); exact leg unflaggable (byte-identical titles ≠ identical topics — "John Smith" collisions are legitimate distinct docs, same-titled siblings are UI-creatable, and R4 concedes identity was never solvable syntactically); user arbitration on flagged re-mints (the agent has the existing doc in view and the failure mode is a visible reconcilable duplicate, never loss — no new machinery to price) | A flagged re-mint is a conscious duplicate, the accepted reconcilable class (§4 R4); hiding the param is what keeps it an escape hatch instead of a habit |
 
 ---
 
