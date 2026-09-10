@@ -172,7 +172,7 @@ Curated pi tools (one set, not per-KB):
    (§5) — discovery SELECTs include `id` + `root_id` + `box` + `hpath` (all columns on
    every block row), so every discovery row carries the docId that `read` and the write
    modes consume plus its per-row KB attribution (doctrine, §4).
-2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Echo contract (decision record)**:
+2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Per-KB fan-out (decision record)**: the tool issues **one kernel call per resolved KB** (`paths: [<boxId>]`, the shared limit constant as `pageSize`) and merges the results — never one call with multiple `paths` entries under a single `pageSize`. The kernel takes one `pageSize` over the union of the boxes, so a single multi-KB call lets a hit-rich KB fill the entire pre-filter window while another active KB's in-scope matches are dropped pre-filter — invisible to both the post-filter backstop (it drops *out-of-scope* rows) and the truncation marker (it counts *post-filter* rows): the same silent-miss class the `paths`-shape pin guards, one layer deeper. Query has no such hole — `box IN (...)` filters inside SQLite before `LIMIT` applies — so fan-out is what restores recall parity between the two discovery tools. Semantics pinned: merged rows keep per-KB kernel order (no global relevance rank exists — kernel rows carry no scores); the truncation marker is computed per call and aggregated into the envelope (`truncated: N rows — truncated in 2 of 3 KBs`); a single active KB degenerates to exactly the single-call shape (zero change where the bug cannot exist). Cost: N kernel round-trips per search (N = active KBs, normally 1–2), counted by the existing throttle machinery (§9). Pinned by the §10 two-KB saturation case. **Echo contract (decision record)**:
   every row echoes the full doc address — `id` (the matched block, kernel `id`),
   **`root_id`** (kernel `rootID` — a doc's root block ID *is* the `docId` `read` consumes),
   `hpath`, and `box` mapped back to its resolved **KB name per row** (the extension built
@@ -228,7 +228,16 @@ deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and
   detection is exact — `ast.limit` is present or absent; no text-scan consequence map to
   pin. If the result count equals the limit, the tool result says so (`truncated: 64
   rows — refine the query; full result in <path>`); spilled results are JSONL rows
-  (format pinned above).
+  (format pinned above). **Agent-supplied `LIMIT` passes through uncapped (decision
+  record)**: the extension injects a LIMIT only when the AST shows none; an
+  agent-supplied LIMIT is never clamped or rejected — the agent owns its query budget
+  the same way it owns its WHERE clause, the spill mechanism bounds the result
+  (lossless, deferred to disk), the 30 s client timeout bounds a runaway call, and
+  row-level scoping is unaffected (the injected `box IN (...)` rides any LIMIT). The
+  passthrough is pinned by a unit case (§10) so a parser bump can never silently change
+  it. If oversized-LIMIT calls become a real latency pattern, the upgrade path is a
+  one-line `min(existing, 64)` clamp in the same AST rebuild step — deferred until
+  earned.
 - **query scoping (decision record)** — `kb` (array, §5) resolves to notebook IDs; the
   extension owns the `box IN (...)` predicate, the agent never writes `box` or knows IDs.
   Certification is **parser-based, not token-scanned**: `pi-kb` uses **`node-sql-parser`**
@@ -303,7 +312,7 @@ deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and
   is a payload flag alongside the envelope `status`, not a status value: a result can be
   both `truncated` and `post_filtered`. Results echo the resolved KB names **and** the
   injected box IDs, so a multi-KB query result is self-describing.
-- **search** — same shared limit constant and truncation marker.
+- **search** — same shared limit constant and truncation marker (per-KB fan-out, above: per-call `pageSize`, marker aggregated across calls).
 - **read** — no kernel-side limit exists (`getDoc`/`exportMdContent` return whole docs),
   so the spill mechanism is the only budget: large docs spill in full to the temp file
   while the inline result stays small.
@@ -425,8 +434,9 @@ truth, never a tool-predicted address:
 -- then % and _ LIKE-escaped)
 SELECT id, root_id FROM blocks
 WHERE box = ? AND type = 'd' AND content LIKE ? ESCAPE '\'   -- 'docker networking'
--- near-match scan (space/hyphen variance; LIKE is ASCII-case-insensitive)
-... AND (content LIKE ? OR content LIKE ?)   -- 'docker networking%', 'docker-networking%'
+-- near-match scan (space/hyphen/underscore variance; LIKE is ASCII-case-insensitive)
+... AND (content LIKE ? OR content LIKE ? OR content LIKE ?)
+-- 'docker networking%', 'docker-networking%', 'docker\_networking%' (_ escaped: LIKE wildcard)
 ```
 
 The exact leg must be `LIKE`, not `=`: `blocks.content` carries the binary (case-sensitive)
@@ -443,7 +453,12 @@ the same `box`/`type='d'` filters). The scan is a plain walk over the box's `typ
 — `content` has no index; its LIMIT caps returned rows, not scan work (fine at
 personal-workspace scale, indexable if it ever isn't). Agent casing drift and user
 retitles that differ only in ASCII case are absorbed transparently; non-ASCII case
-variance (É/é) fails both legs and lands in the accepted-duplicate path.
+variance (É/é) fails both legs and lands in the accepted-duplicate path. The underscore
+leg closes the likeliest cross-session LLM casing drift — kebab-vs-snake
+(`docker-networking` vs `docker_networking`), a pair that matches neither the exact leg
+nor the space/hyphen legs and would otherwise land in the accepted-duplicate tier the
+vector sidecar exists to rescue; `_` is a LIKE wildcard, so it is escaped in the fragment
+like any other.
 
 **Mint policy.** The kernel splits the create request path on `/` and find-or-creates
 every intermediate segment as a real nested doc; its own comment flags the parent matching
@@ -553,7 +568,7 @@ for the identity property.
    before any write — reconciliation is a `delete {docId, doc: true}` of the unwanted doc
    (write modes below); never append to whichever row SQLite returns first. The echoed
    docIds give `duplicate` its exit (R1).
-2. **No exact row** → near-match scan (space/hyphen prefix variants on the title, above;
+2. **No exact row** → near-match scan (space/hyphen/underscore prefix variants on the title, above;
    `%`/`_` escaped in the fragments so a title like `100%_devops` can't widen the scan;
    fragments are built from the HTML-escaped title, same parity as the exact leg;
    writes take exactly one KB name (§5 `kb` param), so the scan is single-notebook-scoped
@@ -609,15 +624,25 @@ for the identity property.
      under a section the agent believes it fully rewrote; sweeping is the coherent
      semantic. Because the inline outline is heading-only (§3), trailing content is
      otherwise invisible at decision time — the write confirmation therefore displays
-     the enumerated delete set's block count (same confirmation surface the `delete`
-     mode's backlink count rides). The new body
+     the enumerated delete set's block count, and the same backlink visibility the
+     `delete` mode's confirmation carries: the `delete` mode's `refs` query (§4,
+     `SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)`) runs over every
+     ID in the walk-enumerated delete set, and the confirmation carries the
+     inbound-ref count plus referring doc hpaths. The asymmetry this closes: the
+     heading ID survives (below), but refs into the section's *content* blocks — the
+     same citation surface `edit`'s `blockId` is sourced from — point at IDs the
+     replace deletes and re-mints, so the preferred, highest-stakes write must show
+     what it orphans, not just the rarer single-block `delete`. Advisory, same
+     semantics as `delete`: the agent has seen the refs and decides. The new body
      lands under the same heading (the anchor rule), so an enumeration issued after the
      insert would sweep the replacement into the delete set and silently empty the
      section.
      Block IDs inside
-     the section are minted fresh, but the heading ID — what other docs' block refs point
-     at — survives (the new body lands under the same heading, which the anchor
-     preserves).
+     the section are minted fresh, but the heading ID survives (the new body lands
+     under the same heading, which the anchor preserves) — refs into the heading
+     resolve; refs into the section's content blocks orphan, and the confirmation's
+     backlink count plus the result's `invalidRefs` echo (§4 write-result contract)
+     make them visible before and after the agent decides.
    - **`append`** — new fact, new section. Headings are leaf blocks — the kernel's
      `appendBlock` requires a *container* parent and rejects `parentID=<heading id>`
      outright — so "insert under a heading" is mechanically insert-with-anchor, and the
@@ -644,7 +669,10 @@ for the identity property.
      `SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)` (the kernel's `refs`
      table in siyuan.db, queryable via `/api/query/sql` — no new tool surface) — and the
      confirmation carries the inbound-ref count plus referring doc hpaths, so the agent
-     decides with the refs in view instead of guessing from the outline. Inbound refs to a
+     decides with the refs in view instead of guessing from the outline. The `IN (...)`
+     set is the walk-enumerated delete set — the target block for block-level deletes,
+     the whole doc's `getChildBlocks` walk for `doc: true` (the §3 SQL-vs-walk
+     precedent: enumeration never rides SQL on a live doc). Inbound refs to a
      deleted block are orphaned — the agent has seen them and decides; doc-level deletes go
      through write confirmation.
    - **`move`** — `/api/block/moveBlock`; the restructure vehicle for same-doc reordering
@@ -801,6 +829,19 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   it must appear in the unfiltered post-write block tree fetched with the outline (the
   same `getChildBlocks` call) — the assertion, not the HTTP code, is what turns the
   kernel's silent rollback into a visible error.
+
+**`invalidRefs`** — every delete-bearing write (`replace-section`, block-level
+  `delete`, doc-level `delete`) echoes the orphan outcome: the count of distinct
+  referring root docs whose refs point into the walk-enumerated delete set, queried
+  through the same documented SQL endpoint as the pre-write confirmation check (§4
+  `delete` mode), run after the delete lands. Verified, not trusted — the same
+  doctrine as `newBlockId`: the post-write echo is what actually got orphaned, not a
+  prediction, closing the loop the confirmation opens (decision input in, outcome
+  evidence out) and giving real-usage telemetry on how often rewrites touch cited
+  content. Advisory like the pre-write check: the derived `refs` index can lag (§9),
+  so a zero count is evidence, not proof. Non-delete-bearing writes omit the field;
+  doc-level `delete` (no doc left to outline) still carries it — the refs query rides
+  the pre-delete walk set, not the vanished doc.
 
 `delete` with `doc: true` carries none of the three (no doc left to outline, and no root
 row left to echo); doc-level
@@ -1197,7 +1238,7 @@ duplicate doc, never a silent clobber.
 | No bulk transactions | No documented bulk-transaction endpoint; large imports and deep restructures are sequential API calls. (Undocumented `batchAppendBlock`/`batchInsertBlock`/`batchUpdateBlock` routes exist in the kernel — headroom, not a dependency: documented-endpoints-only stands; upstream a docs PR, then adopt.) | Host-side offline import script + index rebuild (sanctioned in SY-FORMAT.md §0.5), if a bulk-ingest workload ever appears. |
 | Intra-KB moves only | `move` resolves its destination within the call's single `kb`; cross-KB reorganization has no tool mode. | Hand-move the doc in SiYuan's UI — identity is the docId, so the doc stays reachable from any query row and every follow-up write by echoed docId works; a `toKB` param if a real migration need appears. |
 | Single-KB toggles + one set-wide form | Scope activation is `/kb <name> on\|off` per KB, plus `/kb all on\|off` for set-wide actuation. Named subsets ("these 3 of 5") have no form. | Named KB groups in config (tbox precedent) if subset switching is ever genuinely needed — a group expands to N validated toggles, all-or-nothing at the validation layer. |
-| Title-guard-only dedup (tier 2) | Create-path dedup is the write-only title guard (§4 R3/R4): one exact query + one space/hyphen prefix scan over stored titles. Paraphrases and non-ASCII case variants land as accepted, reconcilable duplicate docs — identity was never solvable syntactically at zero dependencies (R4). | Embedding-assisted dedup in an extension-owned sidecar (v2) — **promoted to the eventual primary mechanism for topic identity** (R4): vectors are derived data, rebuildable from SiYuan content; the embedding model's id is stored per-vector so model swaps are re-embeds, not migrations (no dimension columns in durable storage — the GBrain failure mode). The title guard is retained as the zero-dep fallback when no provider is configured/available (`near_matches` → `degraded_dedup`), not removed. |
+| Title-guard-only dedup (tier 2) | Create-path dedup is the write-only title guard (§4 R3/R4): one exact query + one space/hyphen/underscore prefix scan over stored titles. Paraphrases and non-ASCII case variants land as accepted, reconcilable duplicate docs — identity was never solvable syntactically at zero dependencies (R4). | Embedding-assisted dedup in an extension-owned sidecar (v2) — **promoted to the eventual primary mechanism for topic identity** (R4): vectors are derived data, rebuildable from SiYuan content; the embedding model's id is stored per-vector so model swaps are re-embeds, not migrations (no dimension columns in durable storage — the GBrain failure mode). The title guard is retained as the zero-dep fallback when no provider is configured/available (`near_matches` → `degraded_dedup`), not removed. |
 | Assets out of scope | `exportMdContent` can emit asset references (`assets/…`) the VM-side agent can neither fetch (host network paths) nor write back; v1 treats KB content as text-first. | Host-side asset fetch + re-embed, if image-bearing source docs ever need distilling — extension code stays asset-blind. |
 
 ---
@@ -1242,7 +1283,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 |---|---|---|
 | VM→host connectivity fails | ~~Unknown~~ **Resolved** — smoke test passed (Milestone 0) | Was compose/firewall fix; not an architecture problem. |
 | Unauthenticated workspace access (deployment drift) | ~~Unknown~~ **Resolved** — auth posture verified (Milestone 0) | Non-empty access auth code keeps the anonymous-admin bypass dead; API-token matrix (no-token → rejected, bogus → rejected, real token → `code:0` on guarded + SQL endpoints) passed from the VM. `/api/system/version` has no auth middleware and proves connectivity only — guarded endpoints must be probed when re-verifying. |
-| Auth lockout from agent retry loops | Medium (model tool-retry loops are common) | Extension circuit breaker: 3 consecutive auth failures → degraded fail-fast (§5), under the kernel's lock threshold (6th consecutive failure within a 15-min window); the client never retries 401/403/429 (§2). A 429 with a correct token (lock tripped by a concurrent session or client) is surfaced as the self-healing 429 refusal — never counted toward the breaker, never retried (§5) — and arms a cooldown deadline (now + `Retry-After`, floor 60 s): further kb tool calls are refused locally with zero kernel round-trips, so a retrying model cannot extend the lock (§5). The source-read throttle contract (threshold, window, backoff, `Retry-After`, lock-extension, self-heal) is pinned by the §10 integration throttle case (§5 has the full record). |
+| Auth lockout from agent retry loops | Medium (model tool-retry loops are common) | Extension circuit breaker: 3 consecutive auth failures → degraded fail-fast (§5), under the kernel's lock threshold (6th consecutive failure within a 15-min window); the client never retries 401/403/429 (§2). A 429 with a correct token (lock tripped by a concurrent session or client) is surfaced as the self-healing 429 refusal — never counted toward the breaker, never retried (§5) — and arms a cooldown deadline (now + `Retry-After`, floor 60 s): further kb tool calls are refused locally with zero kernel round-trips, so a retrying model cannot extend the lock (§5). The source-read throttle contract (threshold, window, backoff, `Retry-After`, lock-extension, self-heal) is pinned by the §10 integration throttle case (§5 has the full record). Multi-KB search fan-out (§3) multiplies per-call round-trips by the active-KB count (normally 1–2); an armed cooldown refuses locally before any fan-out call is issued, so it adds no lock-extension surface. |
 | SiYuan kernel API drift | Low (community-stable for years) | Eager version probe at `session_start` (§2) against the pinned tested version; core is thin so surface area is small. The probe refuses writes on **any** drift from the pinned full version — the strict-gate rationale is the §2 decision record; enforcement is the §10 upgrade checklist (run the suite against the new kernel first, then re-pin — a verified conclusion, never a version-number bump). |
 | Model writes garbage into notebooks | Medium | Interactive write confirmation; KB notebooks bound blast radius; user backup strategy outside extension scope. |
 | Headless prompt injection widens scope | Low (corner-case config) | `/kb` dispatches on headless prompt text (§5 headless bound), so untrusted content interpolated into a `pi -p` prompt can carry `/kb all on` and widen an unattended session's write blast radius. **Unsupported combination (§5): headless + `allowUnattendedWrites: true` + untrusted content in the prompt string** — keep untrusted input in files the agent reads via tools; tool results never dispatch commands. Bounded regardless: activation is config-validated, soft-scope ceiling applies (§6). |
@@ -1266,8 +1307,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   extension gets its own suite with a mocked `siyuan-core`, covering:
   - title guard (§4 R3) — the exact leg (ASCII-cased variant matches transparently;
     HTML-special titles match via escape parity — pattern built from the HTML-escaped
-    title, with `%`/`_` LIKE-escaped so they can't widen the scan), the space/hyphen
-    prefix-variant scan, the 20-row candidate cap and its `truncated` marker, and the
+    title, with `%`/`_` LIKE-escaped so they can't widen the scan), the space/hyphen/underscore
+    prefix-variant scan (`docker-networking` vs `docker\_networking` matches the third leg),
+    the 20-row candidate cap and its `truncated` marker, and the
     `confirmNew` skip path (guard fires without it, create proceeds with it); mint-policy
     rejections — empty after trim, `/` in title, >512 runes, and tab/newline/control
     characters (each with the rephrase-hint message);
@@ -1294,6 +1336,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - LIMIT presence read off the AST; an `||`-containing statement (vitess rejects `||`,
     so the kernel falls to the `queryRawStmt` text-scan path, `sql/block_query.go` —
     the extension's injected LIMIT must still be present in the executed statement);
+    agent-supplied LIMIT passes through verbatim — a statement with `LIMIT 100000`
+    executes with that limit, never clamped or rejected (the §3 passthrough decision
+    record);
   - post-filter rules — box-less aggregate rows skip the backstop; the truncation
     marker fires when `kept + dropped` reaches the limit;
   - `kb`-param rejection messages, incl. the empty-array rejection (no kernel call
@@ -1336,8 +1381,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     confirm both resolve to refusal (the §5 fail-closed direction; the confirm call
     carries the timeout so an unresponsive RPC client cannot deadlock the turn); a
     `replace-section` confirmation on a final section displays the enumerated delete
-    set's block count (the §4 visibility fix for trailing content the heading-only
-    outline can't show);
+    set's block count plus the inbound-ref count and referring doc hpaths over the
+    walk-enumerated delete set (the §4 visibility fixes for trailing content the
+    heading-only outline can't show and for refs into section content), and the
+    delete-bearing results carry `invalidRefs` (§4 write-result contract);
   - status-slot rendering (glyph per probe state, headless-safe);
   - version-gated write refusal (probe failure must fail closed for writes; also covers
     a version mismatch from the pinned full version — the refusal path additionally has
@@ -1413,7 +1460,13 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     second variant runs the same replacement against a doc with trailing non-heading
     content after the final heading and asserts the trailing block is deleted with the
     section (the §4 final-section boundary pin), the new body lands at doc end, and the
-    heading ID survives. The
+    heading ID survives. A third variant plants a block ref from another fixture doc
+    into a *content block inside the section* (not the heading — the same citation
+    surface `edit`'s `blockId` is sourced from): the confirmation surfaced the
+    inbound-ref count and referring doc hpath before the replace, and afterward the
+    ref reports invalid via `listInvalidBlockRefs` with the result's `invalidRefs`
+    echo carrying it (the §4 delete-bearing-write contract; the heading-survives
+    assert above covers the resolving half). The
     insert-before-delete ordering cannot be forced against a live kernel honestly, so it
     is pinned in the mocked unit suite as call order — a failed `deleteBlock` after a
     successful insert leaves visible duplication, never loss;
@@ -1476,9 +1529,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     §4 write-result contract: the `outline` field riding a write result must match a
     fresh post-write query of the doc (heading IDs and order), pinning outline
     freshness as the tool's contract rather than agent discipline; extended again to
-    `refs` freshness: the §4 delete backlink check reads the derived `refs` index, so
-    under index lag it could undercount inbound refs (advisory signal, not a safety
-    gate — the agent still decides) — the same test creates a block ref, immediately
+    `refs` freshness: the §4 backlink checks (the `delete` confirmation, the
+    `replace-section` confirmation, and the post-write `invalidRefs` echo all read
+    the derived `refs` index) could undercount inbound refs under index lag (advisory
+    signal, not a safety gate — the agent still decides) — the same test creates a block ref, immediately
     runs the §4 backlink query (`SELECT DISTINCT root_id FROM refs WHERE
     def_block_id = ?`), and asserts the inbound ref is visible, pinning `refs` onto the
     same sync-flush contract as `blocks`;
@@ -1492,6 +1546,15 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     §3 echo contract): a two-fixture search hit's row carries `root_id`, `box`, and the
     per-row resolved KB name, and `read { kb, docId: root_id }` on that hit succeeds —
     the `search → read` loop the recall harness rides is mechanically valid, not assumed;
+  - **two-KB search saturation pin** (§3 per-KB fan-out): with both fixtures active, plant a
+    shared query term densely in fixture A (past the shared limit) and once in fixture B →
+    assert B's hit arrives with no `post_filtered` flag. Under a single-call union search
+    this fails silently — one `pageSize` fills with A's rows, B's row is dropped pre-filter
+    where neither the backstop nor the truncation marker can see it — so the case proves the
+    fan-out, not the shape (pinned separately above); a second assertion densifies past the
+    limit in *both* fixtures → the aggregate `truncated` marker names both KBs (per-call
+    accounting, merged envelope, §3). Runs on the deterministic two-KB workspace the fixture
+    policy already supplies;
   - `exportMdContent` block-ID absence pinned: grep the exported markdown for `{: id=` and
     assert zero matches — the §3 inline-outline mechanism is built on this claim, and the
     renderer lives in the `88250/lute` dependency (not in local checkouts), so the
@@ -1618,7 +1681,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | `/kb` subcommands | Reserved-keyword check on the first argument, bare `/kb` prints the current scope, conflicts rejected at startup; the reserved set is just `all` (R5 — no slug convention survives, so no janitor subcommand exists) | `/kb repair` (overclaims, collides with plausible KB names); separate top-level commands | One reserved set, one `if`; `all`'s consumer is the surviving `/kb all on\|off` set-wide toggle, so a KB named `all` is still rejected at startup (R5) |
 | Version gate | Eager probe at `session_start`, verdict cached, writes fail-closed until one successful probe (never-probed = no writes); **strict full-version match for writes** — any drift from the pinned version refuses writes, reads warn-and-proceed (revised from major-only after external review); no *automatic* staleness re-probe — §5 recovery's per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict | Pre-write probe every call; re-probe on staleness; major-only refusal (never fires on the minor-version drift class the gate exists for — duplicate-minting create landed in v3.7.0, all pins at 3.8.2) | One HTTP call per session in the happy path (the per-write-attempt retry runs only while no probe has ever succeeded); reads unaffected; §8's pinned compose tag makes upgrades deliberate, so strictness never fires on a background point release — it fires exactly when the §10 upgrade checklist should run; mid-session version swap out of threat model |
 | Doc addressing & discovery (R1/R2/R6, **supersedes the v1 title-as-primary-key doctrine**) | Docs addressed by **echoed docId** (query/outline/write-result echoes); `read` = `kb` + `docId` (topic param removed; read-by-name does not exist); discovery is search/query's job (rows echo the doc address — `root_id` + per-row KB attribution — with `id` + `hpath` as display); the recall loop is `search/query → read {kb, docId}`, a hit directly consumable with no resolution hop; the doctrine line — *mint by title (kernel-normalized), discover by query/search, consume by ID* — pinned in the tool descriptions; doc-level targeting rides the pure-ID endpoints (`/api/filetree/moveDocsByID`, `/api/filetree/removeDocByID` — S1: the path-based `moveDocs` shapes fail the kernel's `IsNodeIDPattern` check) | Name/hpath resolution (basenames force disambiguation state machines for same-basename collisions; path-qualified topics weaken recall and re-open the A1 blocker — the v1 hpath-equality lookup could not reach a moved doc, the silent topic-fork failure); keeping read-by-topic with docId fallback (retains the near-match/duplicate machinery on the read path for one saved query hop) | SiYuan's doc ID is the identity key (`data/<notebook>/<blockID>.sy`, uniqueness by minting); hpath is a derived label — rebuilt on every rename/move, collidable (duplicate-minting create since v3.7.0, unguarded `renameDoc0`). The schema principle (targets are agent-supplied IDs read off tool-echoed data) extends up one level; scoping rides the one ownership query. GBrain anchor: its query skill discovers by search and reads full pages only on confirmed targets — this revision goes one step stricter and refuses name-reads entirely; the one-query recall hop in fresh sessions is what the vector sidecar (§6) improves rather than works around |
-| Create addressing (R3, **supersedes the v1 slug mint address**) | `create` takes a **title**; write-only existence guard on the kernel's **stored titles** (`blocks.content`, `LIKE`-based — ASCII-case-insensitive exact leg, escaped wildcards, space/hyphen prefix-variant scan); mint policy builds the submission path from ground truth (trimmed title; top-level single-segment path; nested = stored parent hpath read-back + `parentID` pair); verified-create keys on the kernel-returned root ID, fail-loud on nested shape (nested hpath assert derived from the read-back child row, never the submitted title) | Guard on slug-hpath equality (inherits every hpath problem); keeping the slugifier as the mint address (predicts what the kernel stores → forced sanitize-parity, lowercase doctrine, user-edit drift class, and a janitor) | The kernel stores `normalizeDocTitle(submitted)` — a tool-predicted hpath can only be matched by replicating kernel sanitization, which was the entire downstream mechanism chain (slugifier, parity pins, lowercase rule, fix-slugs, hand-rename advisory — all deleted with it); reading stored titles back is kernel ground truth. Titles whose stored form would unpredictably transform (tab/newline/control) are rejected at mint with a rephrase hint; HTML-special titles are guard-matched via escape parity (deterministic transform, parity pinned live by the §10 round-trip), so the guard only ever faces titles it can reproduce in their stored form |
+| Create addressing (R3, **supersedes the v1 slug mint address**) | `create` takes a **title**; write-only existence guard on the kernel's **stored titles** (`blocks.content`, `LIKE`-based — ASCII-case-insensitive exact leg, escaped wildcards, space/hyphen/underscore prefix-variant scan); mint policy builds the submission path from ground truth (trimmed title; top-level single-segment path; nested = stored parent hpath read-back + `parentID` pair); verified-create keys on the kernel-returned root ID, fail-loud on nested shape (nested hpath assert derived from the read-back child row, never the submitted title) | Guard on slug-hpath equality (inherits every hpath problem); keeping the slugifier as the mint address (predicts what the kernel stores → forced sanitize-parity, lowercase doctrine, user-edit drift class, and a janitor) | The kernel stores `normalizeDocTitle(submitted)` — a tool-predicted hpath can only be matched by replicating kernel sanitization, which was the entire downstream mechanism chain (slugifier, parity pins, lowercase rule, fix-slugs, hand-rename advisory — all deleted with it); reading stored titles back is kernel ground truth. Titles whose stored form would unpredictably transform (tab/newline/control) are rejected at mint with a rephrase hint; HTML-special titles are guard-matched via escape parity (deterministic transform, parity pinned live by the §10 round-trip), so the guard only ever faces titles it can reproduce in their stored form |
 | Title policy (R4, **supersedes the v1 "create determinism" claim**) | Four-tier taxonomy stated explicitly: ASCII casing → guard exact leg; shared prefix → near-match scan; transform-forming strings → rejected at mint; paraphrase → accepted duplicate, reconciled later. The §6 vector-dedup sidecar is promoted to the eventual **primary** mechanism for topic identity; the guard is the zero-dep fallback | Claiming "same title → same address across sessions" as identity determinism (determinism of form for identical strings only — LLMs paraphrase, tier 4 was never solvable syntactically) | GBrain's dedup rides embedding similarity for the same reason (`create_safety: exists \| probable \| unknown`); tier-2 guard + accepted-duplicate path is their `probable/unknown` with LIKE instead of vectors |
 | User edits (R5) | UI renames and hand edits to KB docs are safe by construction — identity is the docId; no hand-rename advisory or rename-detection machinery; `/kb fix-slugs` and the `fix-` prefix reservation do not exist (nothing to repair without a slug convention); `all` stays reserved (its consumer survives) | Keeping fix-slugs for title hygiene (no slug convention left to enforce) | A rename's worst case is the accepted two-docs-reconcilable path — one guard miss, reconcilable, never data loss; block IDs and docIds survive renames untouched |
 | Settings parent key | Single `pi-kb` parent key (= package name), full shape pinned in §5 | Bare `kb` parent key; flat per-KB keys | Namespace collisions with other extensions; `defaultKBs` needs an array to reference |
@@ -1634,13 +1697,16 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Query scoping | Parser-certified `box IN (...)` injection — `node-sql-parser@5.4.0` exact-pinned in `pi-kb` (bumps gated by the §10 upgrade checklist: parser regression = silent mis-scope), parenthesized WHERE splice, FROM allowlist (`blocks`/`refs`), single-table-FROM-only (JOINs rejected: the unqualified injected `box` is ambiguous against a two-table FROM), no CTEs (kernel readonly permits WITH — `stmt_validate.go:165` — so layer 1 is the only line of defense, and a CTE shadowing an allowlisted name would fabricate in-scope rows) — plus kernel `mode: "readonly"` and the box-carrying-rows post-filter backstop; anything else rejected, never guessed at | Post-filter only (aggregates wrong, and box-less aggregate rows would all be dropped); hand-rolled token scanner (OR-precedence, aggregate-backstop, and unrestricted-FROM holes — silent mis-scope class); agent-supplied filter (guesswork); raw SQL rewriting (silent semantics change) | The parser answers "single top-level SELECT over allowlisted tables" exactly; injection lands parenthesized in the top-level WHERE so aggregates compute over in-scope rows only; `mode: "readonly"` (source-supported, same named-exception class as fullTextSearchBlock) makes the query tool structurally unable to write; the backstop exempts box-less aggregate rows because layer 1 guarantees scoping (no `blocks(box)` index — correctness mechanism, not performance) |
 | SQL certification dependency | `node-sql-parser@5.4.0` (SQLite dialect) exact-pinned in `pi-kb` — bump gated by the §10 upgrade checklist | Hand-rolled token scanner; coords-based text splice | Scanner failure mode is silently wrong results; the kernel itself uses vitess `sqlparser` for its LIMIT clamp; executed parser spike (node-sql-parser@5.4.0, SQLite): no AST locations on any dialect → coords splice impossible; serializer round-trip stable on the certified subset → injection = AST rebuild + `sqlify` + re-parse verification; multi-statement returns an array (reject), UNION hides in `_next`/`set_op` under `type: 'select'` (reject on fields); `siyuan-core` stays zero-dependency |
 | Search request shape | `paths: [<boxId>]` (kernel derives boxes from the first path segment) | A `boxes` JSON field | No such field exists — silently ignored → whole-workspace search where pre-filter truncation can drop all in-scope matches |
+| Agent-supplied query LIMIT | Passthrough uncapped — the extension injects a LIMIT only when the AST shows none; agent-supplied limits are never clamped or rejected (§3) | Clamping to the shared limit constant; rejecting LIMITs above it | The agent owns its query budget like it owns its WHERE clause; the spill mechanism already bounds the result (lossless, deferred) and the 30 s client timeout bounds a runaway call, so a clamp adds code and a behavioral surprise ("why did my LIMIT shrink?") to protect the agent from its own explicit input — one slow call it self-corrects from is the reconcile loop the design trusts everywhere else. Upgraded if oversized-LIMIT latency ever shows in use: one-line `min(existing, 64)` clamp in the existing AST rebuild. Pinned by the §10 passthrough unit case |
+| Multi-KB search fan-out | One kernel call per resolved KB (`paths: [<boxId>]`, shared limit as `pageSize`), merged extension-side — per-KB kernel order preserved; per-call truncation accounting aggregated into the envelope marker | One call with multiple `paths` entries under a single `pageSize`; raising `pageSize` to cover the union | The kernel takes one `pageSize` over the union of boxes, so a hit-rich KB fills the pre-filter window and silently starves other KBs' in-scope matches — dropped pre-filter, invisible to both the post-filter backstop and the truncation marker (the same silent-miss class as the `paths` shape, one layer deeper); query has no such hole (`box IN (...)` filters inside SQLite before `LIMIT`), so fan-out restores recall parity between the two discovery tools; no global relevance rank exists anyway (kernel rows carry no scores), so per-KB ordering loses nothing; a single active KB degenerates to the exact single-call shape. Pinned by the §10 two-KB saturation case |
 | Search method param | `method` is tool-owned: extension always sends `method: 0` (keyword) and rejects agent-supplied values — the same ownership rule covers the aux params `types`/`orderBy`/`groupBy`, which the tool **omits entirely** (kernel defaults apply; absent is the pinned behavior) | Exposing `method` (or the aux params) to the agent; inventing tool-side defaults for the aux params | `method: 2` is SQL search gated to admin role only (`api/search.go`) — the API token is always admin, so an agent-supplied `method` would smuggle raw SQL through the search route past the §3 parser certification; one tool-schema constraint closes it |
 | replace-section ordering | Insert new body, then delete old (insert-before-delete) | Delete-then-insert | Mid-sequence failure costs visible duplication, never loss — no kernel transactions (§6) |
 | Auth lockout | Extension circuit breaker, 3 consecutive auth failures → degraded fail-fast; 429 with a correct token is a separate class — never counted toward the breaker, never retried, surfaced as a self-healing lockout refusal (the state is kernel-side and expires on its own, so no `/kb` recovery applies), and arms a **cooldown deadline** (now + `Retry-After`, floor 60 s) under which every kb tool call is refused locally with zero kernel round-trips — the structural counterpart to the breaker, so a retrying model cannot extend the lock; the refusal message says the token is probably correct, forbids token/settings edits and retries, and tells the model to report and pause; recovery = any `/kb` dispatch re-runs the full validation pass (settings re-read, probe, notebooks) and on success clears the breaker | Client-side never-retry alone (the agent's tool-call retry loop is the real retry loop); a message-only 429 refusal (a model that retries makes real kernel calls, each extending the lock — the "agent discipline" pattern the design rejects); restart-only recovery; counting 429s toward the breaker (a healthy session would degrade for another client's bad token) | The kernel locks the IP on the 6th consecutive failure in a 15-min window (locked-out requests themselves extend the lock — a model-paced retry loop can keep the whole VM locked out), shared with the access-auth path. The cooldown converts the dangerous loop into a harmless one (local time check, no lock extension) without expiry polling (any poll extends the lock), cross-restart persistence (kernel lock survives restart anyway; one bounded wasted call), or per-tool cooldowns. A sticky breaker without a re-read path would keep refusing after the token is fixed (settings are injected at construction); the `/kb` hook is user-typed and un-invocable by the agent, so it can never widen its own retry budget. The source-read throttle numbers (first lock 60 s = `30 << (6-5)`, second 120 s) are pinned by the §10 integration throttle case (§5 has the full record) |
 | Encrypted notebooks | Rejected at `session_start` validation (`encrypted: true` → KB rejected, named) | Warn-and-proceed | The SQL surface sees only the global `siyuan.db` — an encrypted KB's blocks are invisible to the title guard, verified-create's by-ID asserts, and the backlink check, so the §4 flow misfires (§5, §9) |
 | Tool surface for reconciliation | Write-back gains `delete` (block/doc) and `move` modes; `move` is cross-doc, intra-KB only (cross-KB reorganization is a UI hand-move, §6) — destination by `toDocId` (echoed, ownership-checked like every doc target) + optional `toHeadingId`, tool-fetched destination outline, tool-derived anchor across the doc boundary; result carries both outlines (`outline`/`destOutline`) + `movedBlockId` (ID preserved by `moveBlock` — never a fresh mint); `move doc: true` is the doc-level flavor via `/api/filetree/moveDocsByID` (`fromIDs` + `toID`, S1) — restructure/growth vehicle alongside nested `create` (`toDocId` omitted → un-nest to notebook root); tool-side self-descendant rejection because the kernel silently no-ops that move (`FilterMoveDocFromPaths`) | Defer reconciliation/restructure out of v1; insert-copy+delete for cross-doc moves (mints fresh IDs, orphans inbound refs — the no-whole-doc-rewrites hazard at block granularity) | §4's `duplicate` status and doc-tree restructuring are unreachable without them; still one tool, mode param; `moveBlock`/`moveDocsByID` preserve block IDs so provenance survives; a move touching two docs must echo both fresh outlines or the next chained write runs stale; after a doc-level move the doc is consumed by its echoed docId — the hpath echo is display only (R1) |
 | Search transport | Named exception for `/api/search/fullTextSearchBlock` (`paths`-derived scoping + post-filter backstop) | SQL `content LIKE` only; full MCP transport | SiYuan's MCP server exposes `search.fulltext` as a supported agent-facing tool wrapping the identical kernel function — upstream support commitment by proxy; fallback if it breaks: SQL `LIKE` over documented `/api/query/sql` |
-| Delete safety | Backlink check before delete via documented SQL over the kernel's `refs` table (`SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)`) | Guess from outline; separate backlinks tool/endpoint | Zero new tool surface — `refs` is queryable through the same documented SQL endpoint; confirmation carries inbound-ref count + referring docs so the agent decides with refs in view |
+| Delete safety | Backlink check before delete via documented SQL over the kernel's `refs` table (`SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)` — the `IN` set is the walk-enumerated delete set: target block, section walk, or whole-doc walk per mode) | Guess from outline; separate backlinks tool/endpoint | Zero new tool surface — `refs` is queryable through the same documented SQL endpoint; confirmation carries inbound-ref count + referring docs so the agent decides with refs in view |
+| Replace-section ref visibility | Delete-bearing writes (`replace-section`, block/doc `delete`) carry the same backlink visibility as any delete: the `refs` query rides the confirmation (count + referring doc hpaths) and the result echoes `invalidRefs` — the actually-orphaned count, post-write (§4) | Ref-preserving section rewrite (enumerate old blocks, parse the new body, pair by position/similarity, `updateBlock` survivors in place so their IDs — and inbound refs — survive; delete/insert only the true diff) | Pairing is a heuristic: a mismap silently rewrites the wrong block's content under a surviving ID, and the (still-valid) refs guarantee no signal — invisible corruption, strictly worse than the visible orphan class this fixes (`listInvalidBlockRefs` and the `invalidRefs` echo see orphans; nothing sees a mismap). Also N+ kernel calls vs two and more partial-failure states behind the no-bulk-transactions ceiling (§6). The doctrine is agent-decides-with-refs-in-view, so pre-write and post-write visibility is the fix — not ID preservation |
 | Write-back tool schema | Every call: `kb` (single name) + `mode` (+ `markdown` on content-bearing modes only); `create` takes `topic` (a title, R3) + optional `parentId`; every other mode takes `docId` (echoed target); block targets (`blockId`/`headingId`) agent-supplied, anchors (`previousID`/`nextID`/`parentID`) always tool-derived from the outline; `replace-section` is one tool call; every doc-targeting write result echoes the fresh heading outline, the resolved anchor, the new block ID, and the doc's root docId + stored title + real hpath (display) | Agent-supplied anchors (re-exposes the list-nesting trap the anchor rule avoids); multi-call replace-section (re-exposes the stale-enumeration hazard the insert-before-delete ordering avoids); post-write agent re-reads (a discipline rule that decays in long sessions — fresh-state-in-result cannot be forgotten) | Targets are data the tool already showed the agent; anchors are derived placement — conflating them is how an agent-supplied `previousID` lands a block inside a section-ending list; the docId echo is the input to every follow-up read/write/move (R1); riding the outline/anchor/newBlockId on the result makes chained writes re-read-free and the doc-end fallback visible at the moment it happens |
 | Stale targets | Every insert-bearing write result is verified: `newBlockId` must appear in the fresh post-write block tree (the unfiltered `getChildBlocks` walk set — a heading-only outline can never evidence a paragraph insert), else `{status: error}` naming the vanished target with the outline attached; `edit` surfaces the kernel's synchronous not-found error verbatim; `delete` on a vanished target is accepted as a benign no-op with the unfiltered walk-ID set as evidence; `move` is verified like an insert — `movedBlockId` must appear in the destination's post-move walk set and be absent from the source's | Trust the kernel's HTTP result; post-write agent re-reads as a discipline rule | Verified against source at 3.8.2 (full per-op classification and evidence in §4): only `updateBlock` fails synchronously — vanished-target inserts and tree-level moves roll back silently behind `code: 0` (websocket-only error push), and `moveBlock`'s degenerate destinations skip silently but are unreachable by tool-derived anchors. §9's accepted concurrent-session race makes vanished targets reachable, and the assertions are free — the `getChildBlocks` walks the write-result contract already fetches carry the evidence (unfiltered ID sets, not rendered heading outlines) |
 
