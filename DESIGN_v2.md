@@ -1297,22 +1297,33 @@ duplicate doc, never a silent clobber.
     for plain objects but **replaces arrays wholesale** (project value wins, global array
     gone — `settings-manager.ts` `isMergeableObject` excludes arrays). The config split
     follows that grain instead of fighting it:
+    - **Read path (pinned)**: pi exposes no settings API to extensions (`ExtensionContext`
+      in `extensions/types.ts` carries no settings field), so the extension reads the
+      settings files itself — and which file it reads *per key* is the enforcement
+      mechanism, not a validation warning after the fact. Pi's deep merge replaces arrays
+      wholesale (`isMergeableObject` excludes arrays), so a project-declared `kbs` in a
+      merged view has already replaced the global array before any validation could see
+      it — a warn-on-merged-view posture cannot guard array keys at all. Therefore:
     - **`kbs` + connection settings (`baseUrl`, `apiToken`, `allowUnattendedWrites`):
-      global-only.** These are deployment facts — notebook IDs live in exactly one place,
-      so they can never go stale in two. Projects must not declare them; validation warns
-      if a project settings file sets `kbs` or connection keys (the values would
-      invisibly override, splitting one deployment's truth across files).
-    - **`defaultKBs`: both levels, array-replace is the intended semantics.** A project
-      declaring `defaultKBs` states its complete active set — that is precisely the
-      composition rule wanted, and pi already implements it. A project wanting the
-      global default omits the key (object merge lets the global value through).
+      global-only, by construction.** The extension reads these keys from the **global
+      settings file** (`~/.pi/agent/settings.json`) specifically — never from the merged
+      view — so a project `.pi/settings.json` cannot override them even in a trusted
+      project, by construction rather than by warning. These are deployment facts —
+      notebook IDs live in exactly one place, so they can never go stale in two.
+    - **`defaultKBs`: both levels, extension-implemented array-replace.** The extension
+      reads `defaultKBs` from the project file first, falling back to the global value
+      when the project file omits it — a project declaring `defaultKBs` states its
+      complete active set, which is precisely the composition rule wanted (the
+      extension's own read rule happens to implement pi's array-replace grain, so the
+      behavior matches the merged view where it matters). A project wanting the global
+      default omits the key.
     - Workflow fit: project-scoped `defaultKBs` activates the project's KB in its
       checkout; global `defaultKBs` covers the personal cross-project memory KB. A
       project that wants both just lists both names in its `defaultKBs` — names are
       cheap to re-list, unlike notebook IDs.
-    Validation note: `defaultKBs` names are validated against the (global) `kbs` array at
-    `session_start`, so a project default naming a missing/renamed KB still fails loudly
-    at startup rather than producing a half scope.
+    Validation note: `defaultKBs` names are validated against the (global-only) `kbs`
+    array at `session_start`, so a project default naming a missing/renamed KB still
+    fails loudly at startup rather than producing a half scope.
 - **Tool shape**: single tool set with a validated `kb` string param (Flavor B: visible,
   validated at call time, helpful rejection on out-of-scope values). Context surface stays
   flat regardless of KB count. **`read` takes exactly one KB name plus a `docId` (the §4
@@ -1525,7 +1536,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     requests on the test-harness request log), and a post-expiry call succeeds without
     any recovery step (§5);
   - settings validation order (shape → probe → notebooks, incl. the
-    project-declares-`kbs` warning branch and the token-failure branch);
+    project/global read path (global-only `kbs`/connection keys read from the global
+    file specifically; project `defaultKBs` wins over global when present) and the
+    token-failure branch);
   - error-envelope shape;
   - write-confirmation branches — allow/refuse; a cancelled confirm and a timed-out
     confirm both resolve to refusal (the §5 fail-closed direction; the confirm call
@@ -1870,7 +1883,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Title policy (R4, **supersedes the v1 "create determinism" claim**) | Four-tier taxonomy; accepted-duplicate tier; vector sidecar eventually primary | Claiming same-title identity determinism | §4, §6 |
 | User edits (R5) | Safe by construction; no rename-detection machinery or janitor | Hand-rename advisory; `fix-slugs` subcommand | §4, §9 |
 | Settings parent key | Single `pi-kb` parent key (= package name) | Bare `kb` key; flat per-KB keys | §5 |
-| Project/global config split | `kbs` + connection global-only; `defaultKBs` at both levels (array-replace intended); absent = empty set | Projects re-declaring `kbs`; absent = activate-all | §5 |
+| Project/global config split | `kbs` + connection global-only **by read path** (extension reads them from the global settings file specifically, never the merged view — pi exposes no settings API to extensions, and array-replace makes warn-on-merge unguardable); `defaultKBs` at both levels, extension-implemented project-wins replace | Projects re-declaring `kbs`; absent = activate-all; warn-on-merged-view enforcement (unguardable for array keys) | §5 |
 | Error surface | Pinned status classes (`ok`/`near_matches`/`duplicate`/`error`/`refused`); `truncated`/`post_filtered` are payload markers | Free-text statuses; `truncated` as a sixth status | §5 |
 | Headless writes | Default-deny via `allowUnattendedWrites`; RPC is not headless; confirm timeout fail-closed | Default-allow; CLI flag; per-session toggle | §5, §9 |
 | Spill files | Per-session dir, content-hash names, JSONL/`.md`, **no cleanup machinery** | TSV; flat dir; terminal-shutdown cleanup | §3, §9 |
