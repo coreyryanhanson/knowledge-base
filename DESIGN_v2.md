@@ -169,20 +169,30 @@ Curated pi tools (one set, not per-KB):
 1. **query** — SQL over blocks (`/api/query/sql`, always `mode: "readonly"` — the §2
    second named exception), scoped to active KBs (mechanism pinned
    below). Tool-owned discovery: the tool description pins the include-`hpath` pattern
-   (§5) — discovery SELECTs include `id` + `root_id` + `box` + `hpath` (all columns on
-   every block row), so every discovery row carries the docId that `read` and the write
-   modes consume plus its per-row KB attribution (doctrine, §4).
+   (§5) — discovery SELECTs include `id` + `root_id` + `box` + `hpath` + `updated`
+   (all columns on every block row), so every discovery row carries the docId that `read`
+   and the write modes consume, its per-row KB attribution, and its recency signal
+   (doctrine, §4).
 2. **search** — full-text search via `/api/search/fullTextSearchBlock` (the §2 first named exception), scoped to active KBs. The route has **no `boxes` field** — `parseSearchBlockArgs` (kernel/api/search.go) derives the box set from the first segment of each `paths` entry — so the extension resolves `kb` names to notebook IDs and sends `paths: [<boxId>...]` (request shape pinned by integration test, §10: a wrong shape is *silently ignored* by the kernel and degrades to whole-workspace search, where pre-filter `pageSize` truncation can drop every in-scope match); the agent never writes box IDs and no injection machinery is needed, unlike query. **`method` is tool-owned, never agent input (decision record)**: the route accepts `method: 2` — SQL search — which the kernel gates to admin role only (`api/search.go`), and the API token is always admin, so an agent-supplied `method` could smuggle raw SQL through the search route, bypassing the query tool's parser certification entirely (it reaches the same index the query tool guards, so it is a certification bypass, not a new capability surface). The extension always sends `method: 0` (keyword search) and rejects any agent-supplied `method` value — one tool-schema constraint closes the bypass. The same ownership rule covers the route's auxiliary params (`types`, `orderBy`, `groupBy`): tool-owned, rejected if agent-supplied — same smuggling class as `method`, smaller stakes, one schema constraint each so no second `method`-shaped hole appears mid-build. Tool-owned values are pinned too: the tool sends only `query`, `paths`, `pageSize`, and `method: 0` — the aux params are **omitted entirely**, letting the kernel's own defaults apply (`parseSearchBlockArgs` defaults `orderBy`/`groupBy` to 0 and `types` to the full default set when absent, `api/search.go:626-705`); absent is the pinned behavior, never invented defaults. **Post-filter backstop**: returned blocks are dropped unless their box is in the resolved set (`post_filtered: true` in the result, same semantics as query); the truncation marker counts post-filter matches. **Per-KB fan-out (decision record)**: the tool issues **one kernel call per resolved KB** (`paths: [<boxId>]`, the shared limit constant as `pageSize`) and merges the results — never one call with multiple `paths` entries under a single `pageSize`. The kernel takes one `pageSize` over the union of the boxes, so a single multi-KB call lets a hit-rich KB fill the entire pre-filter window while another active KB's in-scope matches are dropped pre-filter — invisible to both the post-filter backstop (it drops *out-of-scope* rows) and the truncation marker (it counts *post-filter* rows): the same silent-miss class the `paths`-shape pin guards, one layer deeper. Query has no such hole — `box IN (...)` filters inside SQLite before `LIMIT` applies — so fan-out is what restores recall parity between the two discovery tools. Semantics pinned: merged rows keep per-KB kernel order (no global relevance rank exists — kernel rows carry no scores); the truncation marker is computed per call and aggregated into the envelope (`truncated: N rows — truncated in 2 of 3 KBs`); a single active KB degenerates to exactly the single-call shape (zero change where the bug cannot exist). Cost: N kernel round-trips per search (N = active KBs, normally 1–2), counted by the existing throttle machinery (§9). Pinned by the §10 two-KB saturation case. **Echo contract (decision record)**:
   every row echoes the full doc address — `id` (the matched block, kernel `id`),
   **`root_id`** (kernel `rootID` — a doc's root block ID *is* the `docId` `read` consumes),
-  `hpath`, and `box` mapped back to its resolved **KB name per row** (the extension built
-  the name→box map for `paths` itself, so the reverse mapping is free), making a multi-KB
-  search result self-describing — the same property the query envelope already has. Search
+  `hpath`, `box` mapped back to its resolved **KB name per row** (the extension built
+  the name→box map for `paths` itself, so the reverse mapping is free), and `updated`
+  (recency echo, same column the query pattern carries — see the shape note below),
+  making a multi-KB search result self-describing — the same property the query envelope
+  already has. Search
   is the discovery step: a hit is directly consumable as `read { kb, docId: root_id }`
   with no intermediate box→name resolution hop, so the `search → read` recall loop (§4)
   never dead-ends on attribution. (Kernel shape verified at 3.8.2: the route returns
-  `[]*Block` whose JSON carries `box`, `rootID`, `hPath`, `id` per hit —
-  `model/block.go:44-48`.)
+  `[]*Block` whose JSON carries `box`, `rootID`, `hPath`, `id`, `updated` per hit —
+  `model/block.go:43-74`; the FTS projections select `created, updated` verbatim,
+  `model/search.go:2479`, and `fromSQLBlock` copies `Updated` through untruncated —
+  unlike `content`, capped at 5120, and `hpath`, snippet-cut at 512 bytes, which is one
+  more reason hpath is display-only in this doctrine — `model/search.go:3094`. The
+  multi-word doc-mode path rides `SELECT blocks.*`, full row included —
+  `model/search.go:2764-2800`.) `updated` is the **matched block's** update time, not the
+  doc's: doc-level recency for reconciliation reads the root row (`id = root_id`) or a
+  `read`, never whichever block happened to match.
 3. **read** — fetch a doc as GFM markdown via `exportMdContent`. `getDoc` (DOM output) is
    never used — the block-ID outline and spill design presuppose GFM. **Addressing
    (decision record, R2; full record §4): `read` takes `kb` (one name) + `docId`** — an
@@ -564,7 +574,11 @@ for the identity property.
    runs the guard's exact leg. **More than one row** (a normal kernel-created state —
    same-titled siblings are creatable in the UI, and the guard→create race can produce
    one) → `duplicate`
-   status: return all rows — docId, title, and each doc's **budgeted heading outline**
+   status: return all rows — docId, title, each doc's **`updated` timestamp** (the
+   recency signal for the reconciliation judgment: when the loop is "told X twice, the
+   second version differs", the agent must be able to tell which doc is current — without
+   it the reconciliation below is a coin flip between echoed IDs), and each doc's
+   **budgeted heading outline**
    (not a first-paragraph excerpt: with an exact title match the excerpts are identical
    by definition, so the actual judgment — content identity — needs the outline;
    budgeted like §3's outline cap, spill-backed). The agent reconciles before any
@@ -589,7 +603,8 @@ for the identity property.
    `truncated` marker** (one line, reuses the existing envelope machinery; a short title
    like `go` can prefix-match hundreds of docs and the agent drowns in candidates).
    Empty → mint per the policy above (verified-create follows). Near-matches → do NOT
-   create; return the candidates (docId, title, first paragraph) with a `near_matches`
+   create; return the candidates (docId, title, first paragraph, `updated` — same
+   recency signal as the `duplicate` rows, above) with a `near_matches`
    status so the agent consciously chooses: read an existing topic by its echoed docId
    and edit/replace-section it, or create a genuinely new one with **`confirmNew: true`**
    (pinned below). Without that flag the same title hits the same guard on retry — an
@@ -812,7 +827,13 @@ set from the same `getChildBlocks` walk that renders the outline (§3 pins that 
 full ID set is retained for exactly this; an inserted paragraph never appears in the
 heading-only outline, so the outline itself can never be the evidence) — absent →
 `{status: error}` naming the vanished target/anchor, fresh outline attached, never a
-silent success. The other targets ride their kernel behavior or an equivalent
+silent success. **Multi-block bodies upgrade this to a walk-set diff**: the write tool
+accepts arbitrary markdown and the kernel mints one block per parsed block, so a
+multi-block body's `newBlockId` is only the kernel's representative of several — the
+verification compares the post-write walk set against the pre-write set (the same walk
+the anchor derivation already fetches before every write): the returned ID must appear
+among the newly-present IDs, and a single-block body's diff must be exactly that one ID
+(full record on `newBlockId`, below). The other targets ride their kernel behavior or an equivalent
 assertion: an `edit` target's synchronous not-found error surfaces verbatim; a `delete`
 target already gone reports success with the unfiltered post-write block tree as
 evidence — the same walk-ID set the insert verification uses, since a non-heading target
@@ -855,10 +876,19 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   deliberately not built).
 - **`newBlockId`** — the inserted block's ID (insert/append/replace-section modes), the
   kernel call's return value; it is the ready target for a follow-up `edit` without a
-  `query` round-trip. **Verified, not trusted** (stale-target decision record, above):
-  it must appear in the unfiltered post-write block tree fetched with the outline (the
-  same `getChildBlocks` call) — the assertion, not the HTTP code, is what turns the
-  kernel's silent rollback into a visible error.
+  `query` round-trip. **Multi-block markdown (decision record)**: a body that parses to
+  N blocks mints N block IDs, and the kernel returns one representative ID whose choice
+  the tool does not assume (not source-read — the §10 multi-block pin converts the
+  return-value assumption into evidence, the same move as the search-shape pin). For a
+  multi-block body `newBlockId` therefore addresses *one block of the appended content*,
+  never "the whole thing I sent" — an agent that needs a different fragment of its own
+  body re-locates it via the outline/`query` (echoed IDs, R1), the same route as editing
+  any other non-heading block. **Verified, not trusted** (stale-target record, above):
+  the walk-set diff must contain the returned `newBlockId`, and a single-block body's
+  diff must be exactly that one ID — the assertion, not the HTTP code, is what turns
+  the kernel's silent rollback into a visible error, and the diff (not just returned-ID
+  membership) is what keeps the evidence honest when the kernel mints several blocks
+  from one call.
 
 **`invalidRefs`** — every delete-bearing write (`replace-section`, block-level
   `delete`, doc-level `delete`) echoes the orphan outcome: the count of distinct
@@ -1246,9 +1276,13 @@ duplicate doc, never a silent clobber.
     don't require guessing column names; the delete flow's automated backlink check (§4) uses the
     same table. Virtual mentions (text matches in `blocks_fts`) are intentionally out of reach —
     they are not identity refs and are irrelevant to delete safety. It also pins the
-    **include-`hpath` discovery pattern**: `hpath` and `root_id` are columns on every
-    block row (`batchUpdateHPath` stamps the doc-level path on all rows), so a SELECT
-    that includes them returns each block's doc address for free — `read { kb, docId:
+    **include-`hpath` discovery pattern**: `hpath`, `root_id`, and `updated` are columns
+    on every
+    block row (`batchUpdateHPath` stamps the doc-level path on all rows;
+    `updated` is the kernel's `yyyymmddhhmmss` per-block timestamp — sorts lexically, so
+    no parsing machinery ever exists), so a SELECT
+    that includes them returns each block's doc address and its recency for free —
+    `read { kb, docId:
     root_id }` consumes the echoed id directly with zero intermediate calls. Only ids
     from sources that predate the pattern (older spill files, hand-off context) pay the
     one ownership query (§3 read), which is the scoping check itself.
@@ -1577,8 +1611,13 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     shape; the drop behavior itself (contaminated input → filtered, `post_filtered: true`,
     truncation marker counting post-filter rows) is exercised in the mocked unit suite,
     where out-of-scope rows can be supplied; plus a **recall-loop echo assertion** (the
-    §3 echo contract): a two-fixture search hit's row carries `root_id`, `box`, and the
-    per-row resolved KB name, and `read { kb, docId: root_id }` on that hit succeeds —
+    §3 echo contract): a two-fixture search hit's row carries `root_id`, `box`, the
+    per-row resolved KB name, and a non-empty `updated` matching `\d{14}` — the
+    source-read pins say the FTS projections select `updated` verbatim and
+    `fromSQLBlock` copies it through (`model/search.go:2479`, `:3094`), but the row JSON,
+    not the Go struct, is the contract the extension consumes, so the claim is pinned
+    against the live kernel like every other shape claim — and `read { kb, docId: root_id }`
+    on that hit succeeds —
     the `search → read` loop the recall harness rides is mechanically valid, not assumed;
   - **two-KB search saturation pin** (§3 per-KB fan-out): with both fixtures active, plant a
     shared query term densely in fixture A (past the shared limit) and once in fixture B →
@@ -1601,7 +1640,13 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     anchor-echo pin — an `append` on a trailing-content-after-last-heading doc reports
     `anchor: appendBlock(root)` (the
     §4 visibility mechanism for the doc-end fallback), and an insert-bearing write
-    result's `newBlockId` resolves via `query` to the inserted content;
+    result's `newBlockId` resolves via `query` to the inserted content — extended with
+    the **multi-block pin (§4)**: an `append` whose markdown parses to several blocks (a
+    paragraph followed by a list) yields a walk-set diff containing every newly-minted
+    block ID with the kernel-returned `newBlockId` among them, and a single-block body
+    yields a diff of exactly one ID — pinning both the diff-based verification and the
+    kernel's representative-ID choice against the real kernel (the return shape was not
+    source-read, so this test owns the claim);
   - same-doc `move` result pin: a `move` whose `toDocId` names the source doc collapses to
     the standard shape — `outline` + `anchor`, no `destOutline`, `movedBlockId` present
     (the §4 result-shape rule keyed on whether the two docs differ);
@@ -1743,6 +1788,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Replace-section ref visibility | Delete-bearing writes (`replace-section`, block/doc `delete`) carry the same backlink visibility as any delete: the `refs` query rides the confirmation (count + referring doc hpaths) and the result echoes `invalidRefs` — the actually-orphaned count, post-write (§4) | Ref-preserving section rewrite (enumerate old blocks, parse the new body, pair by position/similarity, `updateBlock` survivors in place so their IDs — and inbound refs — survive; delete/insert only the true diff) | Pairing is a heuristic: a mismap silently rewrites the wrong block's content under a surviving ID, and the (still-valid) refs guarantee no signal — invisible corruption, strictly worse than the visible orphan class this fixes (`listInvalidBlockRefs` and the `invalidRefs` echo see orphans; nothing sees a mismap). Also N+ kernel calls vs two and more partial-failure states behind the no-bulk-transactions ceiling (§6). The doctrine is agent-decides-with-refs-in-view, so pre-write and post-write visibility is the fix — not ID preservation |
 | Write-back tool schema | Every call: `kb` (single name) + `mode` (+ `markdown` on content-bearing modes only); `create` takes `topic` (a title, R3) + optional `parentId`; every other mode takes `docId` (echoed target); block targets (`blockId`/`headingId`) agent-supplied, anchors (`previousID`/`nextID`/`parentID`) always tool-derived from the outline; `replace-section` is one tool call; every doc-targeting write result echoes the fresh heading outline, the resolved anchor, the new block ID, and the doc's root docId + stored title + real hpath (display) | Agent-supplied anchors (re-exposes the list-nesting trap the anchor rule avoids); multi-call replace-section (re-exposes the stale-enumeration hazard the insert-before-delete ordering avoids); post-write agent re-reads (a discipline rule that decays in long sessions — fresh-state-in-result cannot be forgotten) | Targets are data the tool already showed the agent; anchors are derived placement — conflating them is how an agent-supplied `previousID` lands a block inside a section-ending list; the docId echo is the input to every follow-up read/write/move (R1); riding the outline/anchor/newBlockId on the result makes chained writes re-read-free and the doc-end fallback visible at the moment it happens |
 | Stale targets | Every insert-bearing write result is verified: `newBlockId` must appear in the fresh post-write block tree (the unfiltered `getChildBlocks` walk set — a heading-only outline can never evidence a paragraph insert), else `{status: error}` naming the vanished target with the outline attached; `edit` surfaces the kernel's synchronous not-found error verbatim; `delete` on a vanished target is accepted as a benign no-op with the unfiltered walk-ID set as evidence; `move` is verified like an insert — `movedBlockId` must appear in the destination's post-move walk set and be absent from the source's | Trust the kernel's HTTP result; post-write agent re-reads as a discipline rule | Verified against source at 3.8.2 (full per-op classification and evidence in §4): only `updateBlock` fails synchronously — vanished-target inserts and tree-level moves roll back silently behind `code: 0` (websocket-only error push), and `moveBlock`'s degenerate destinations skip silently but are unreachable by tool-derived anchors. §9's accepted concurrent-session race makes vanished targets reachable, and the assertions are free — the `getChildBlocks` walks the write-result contract already fetches carry the evidence (unfiltered ID sets, not rendered heading outlines) |
+| Multi-block markdown inserts | `newBlockId` is the kernel call's returned representative ID for a body that mints N block IDs; verification is a **walk-set diff** (post-write minus pre-write walk set — the pre-write set is already fetched for anchor derivation): the returned ID must appear in the diff, and a single-block body's diff must be exactly that one ID; for a multi-block body the result semantics are "one block of the appended content" — agents needing another fragment re-locate it via outline/`query` (echoed IDs, R1) | Membership-only verification of the returned ID (a one-of-N check passes while the walk set — which the contract already fetches — holds the evidence for the whole inserted subtree); asserting the *predicted* full ID set (predicts what the kernel mints from markdown — the R3 no-prediction doctrine, now with a markdown parser in the loop) | The write tool accepts arbitrary markdown and the kernel splits it into blocks; which ID a multi-block insert returns was not source-read, so the choice is pinned by the §10 multi-block case, not assumed — the same assumption-into-evidence move as the search-shape pin; the diff costs nothing (both walk sets are already in hand) and pins what actually landed, not what the kernel's first return value claims |
+| Discovery recency echo | Every discovery row — query SELECTs (include-`hpath` pattern, §5), search hits (echo contract, §3), and `duplicate`/`near_matches` candidate rows (§4) — carries `updated` (`yyyymmddhhmmss`, sorts lexically, no parsing); the echo is **data, not ordering** (kernel order and LIMIT behavior unchanged); doc-level recency reads the root row (`id = root_id`) or a `read`, since the value is per-block | Adding `ORDER BY updated DESC` to discovery (changes which rows survive LIMIT — a behavioral change disguised as an echo); deriving recency from hpath/session memory (no currency signal at all) | The reconciliation loop — "told X twice, the second version differs" — had no signal for which doc is current, leaving `duplicate`/`near_matches` judgments to a coin flip between echoed IDs; the column is free on both tools (query: a plain `blocks` column; search: the kernel FTS projections select `updated` verbatim and `fromSQLBlock` copies it through untruncated — `model/search.go:2479/:3094`, serialized per hit, `model/block.go:73`); root rows are `type='d'`, so their `updated` **is** doc-level — the §4 guard queries and `duplicate` rows already select roots. Pinned by the §10 recall-loop echo assertion (updated-echo leg) |
 | `confirmNew` escape hatch | Hidden from the tool's input schema (discovered only via rejection/duplicate response messages); when passed it bypasses the **entire** title guard — both the exact leg and the near-match scan; write confirmation and verified-create still apply; `duplicate` rows carry the budgeted heading outline (exact-match excerpts are identical by definition, so the identity judgment needs content) | Always-declared optional param (speculative flagging disarms the guard before any collision); exact leg unflaggable (byte-identical titles ≠ identical topics — "John Smith" collisions are legitimate distinct docs, same-titled siblings are UI-creatable, and R4 concedes identity was never solvable syntactically); user arbitration on flagged re-mints (the agent has the existing doc in view and the failure mode is a visible reconcilable duplicate, never loss — no new machinery to price) | A flagged re-mint is a conscious duplicate, the accepted reconcilable class (§4 R4); hiding the param is what keeps it an escape hatch instead of a habit |
 
 ---
