@@ -68,7 +68,12 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
 - **Zero pi imports, zero runtime dependencies** (native `fetch`, hand-rolled types).
 - URL + token injected via config (never hardcoded — the deployment topology requires it).
 - Version check (`/api/system/version`) against a pinned, tested SiYuan version
-  (decision record; ledger row "Version gate"). **Timing**: eager probe at
+  (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-core`
+  exposes `getVersion()` — it fetches `/api/system/version` and returns the raw version
+  string; it holds no pinned constant and enforces nothing. The **extension** owns
+  `PINNED_SIYUAN_VERSION`, the strict-match policy, and the refusal message (§5); the
+  compose tag (§8) and the §10 setup assert are consumers of that constant, not owners.
+  **Timing**: eager probe at
   `session_start`, verdict cached for the session — no write executes before a probe
   has succeeded, and probe failure (unreachable, error) also refuses writes
   (fail-closed: "never probed successfully" means no writes). Reads are never
@@ -1572,7 +1577,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 - **Integration (opt-in)**: profile against the real host SiYuan (reachable from the dev VM);
   skipped by default so CI never needs SiYuan. **Setup asserts the running kernel version exactly equals the pinned version** — an accidental upgrade produces a red suite instead of silently unverified drift; the upgrade checklist is the deliberate path. **Upgrade checklist (the enforcement procedure the §2 strict write gate backs — the gate fires, this checklist is how the re-pin gets earned; a guard no process runs is not a guard)**: on every
   SiYuan upgrade, run the full integration profile against the new kernel *before*
-  updating the pinned version in this repo; a red suite means a behavior pin broke and
+  updating the pinned version (the extension-owned `PINNED_SIYUAN_VERSION` constant, §2); a red suite means a behavior pin broke and
   the affected decision records in this doc need re-verification — the re-pin is a
   verified conclusion, never a version-number bump. The same procedure gates the parser
   dependency: on any `node-sql-parser` version bump, re-run the full parser certification
@@ -1856,7 +1861,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | --- | --- | --- |
 | 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
 | 1 | Repo scaffold — monorepo or two dirs, `siyuan-core` package skeleton, settings schema | `vitest` runs green on trivial test |
-| 2 | `siyuan-core` client — typed endpoints, auth, version check, mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists (the *tool-path* case lands with the extension at M3); the **auth-throttle contract pin** included, ordering per §10; **search `paths`-shape pin runs first** — cheapest falsifier, guards the silent whole-workspace-degradation failure mode §3 search-scoping rests on; a no-code precursor — two `curl` calls from the host — can run before any client code exists) |
+| 2 | `siyuan-core` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists (the *tool-path* case lands with the extension at M3); the **auth-throttle contract pin** included, ordering per §10; **search `paths`-shape pin runs first** — cheapest falsifier, guards the silent whole-workspace-degradation failure mode §3 search-scoping rests on; a no-code precursor — two `curl` calls from the host — can run before any client code exists) |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
