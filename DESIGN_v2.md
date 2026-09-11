@@ -686,16 +686,12 @@ for the identity property.
      target heading up to (not including) that boundary heading — deeper headings (an
      h3 under an h2 target) belong to the section and are deleted with it. **Final
      section (no boundary heading): the slice runs to end of doc, so trailing
-     non-heading content after the last heading is deleted with the section** — pinned,
-     not accidental: the alternative (excluding trailing content) is rejected because
-     the replacement then appends at doc end *after* the surviving fragments, which sit
-     under a section the agent believes it fully rewrote; sweeping is the coherent
-     semantic. Because the inline outline is heading-only (§3), trailing content is
-     otherwise invisible at decision time — which makes the final-section sweep the one
-     place a write can destroy content the agent never saw. The sweep stays (the
-     excluded-content alternative produces the incoherent doc-end-fragments state
-     rejected above), but it is never an unseen deletion: trailing content is part of
-     the delete set, so the write confirmation therefore displays
+     non-heading content after the last heading is deleted with the section** — the
+     excluded-content alternative is rejected: the replacement would then append at doc
+     end *after* the surviving fragments, which sit under a section the agent believes
+     it fully rewrote. Because the inline outline is heading-only (§3), trailing content
+     is otherwise invisible at decision time — which would make the sweep the one place
+     a write destroys content the agent never saw, so the write confirmation displays
      the enumerated delete set's block count, **the delete set's current content** —
      including the final section's trailing blocks (one
      content read over the enumerated IDs — the same read the fresh-content
@@ -924,8 +920,7 @@ tool's job — the same verified-not-trusted doctrine as `newBlockId`:
   approved the write with the current bytes in view.
 - **Precondition**: immediately before the kernel call (after confirmation approval),
   the tool re-reads the targeted content and compares hashes — for `edit`, the target
-  block; for `replace-section`, the walk-enumerated delete set's content (one content
-  read over the enumerated IDs, the same documented SQL endpoint). Any mismatch →
+  block; for `replace-section`, the walk-enumerated delete set's content. Any mismatch →
   `{status: refused, reason: stale_content}` with the current content and fresh
   outline attached, no kernel write fired; the agent re-reads and re-targets. The
   message says the content changed since it was last seen and names the re-read path —
@@ -942,9 +937,8 @@ tool's job — the same verified-not-trusted doctrine as `newBlockId`:
   at delete granularity, consistent with §9.
 
 Cost: one content read per overwrite-bearing write plus one re-read after the
-confirmation — both single SQL reads over IDs already in hand. The `replace-section`
-baseline read doubles as the delete-set content display (above), so it adds no second
-query. Pinned by unit cases and a live integration case (§10).
+confirmation — both single SQL reads over IDs already in hand. Pinned by unit cases
+and a live integration case (§10).
 
 **Write-result contract (pinned)**: every doc-targeting write result carries the fields
 below — `outline`/`anchor`/`newBlockId` on every result that has a doc to outline,
@@ -991,12 +985,7 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   multi-block body `newBlockId` therefore addresses *one block of the appended content*,
   never "the whole thing I sent" — an agent that needs a different fragment of its own
   body re-locates it via the outline/`query` (echoed IDs, R1), the same route as editing
-  any other non-heading block. **Verified, not trusted** (stale-target record, above):
-  the walk-set diff must contain the returned `newBlockId`, and a single-block body's
-  diff must be exactly that one ID — the assertion, not the HTTP code, is what turns
-  the kernel's silent rollback into a visible error, and the diff (not just returned-ID
-  membership) is what keeps the evidence honest when the kernel mints several blocks
-  from one call.
+  any other non-heading block. **Verified, not trusted** (stale-target record, above).
 
 - **`invalidRefs`** — every delete-bearing write (`replace-section`, block-level
   `delete`, doc-level `delete`) echoes the orphan outcome: the count of distinct
@@ -1026,10 +1015,9 @@ agent's next `edit`/`replace-section` against the other doc on a stale outline �
 the decay the freshness contract exists to prevent. The moved block's ID is echoed as
 **`movedBlockId`**, not `newBlockId`: `moveBlock` preserves the ID (that is the
 identity-preserving property the mode exists for), and the echo is the ready target for
-a follow-up `edit` in the destination. **Verified, not trusted** (stale-target decision
-record, above): `movedBlockId` must appear in the destination's post-move walk set and
-be absent from the source's — the outlines the result already carries are the evidence.
-Same-doc `move` collapses to the standard shape
+a follow-up `edit` in the destination. **Verified, not trusted** (stale-target record,
+above — the outlines the result already carries are the evidence). Same-doc `move`
+collapses to the standard shape
 (`outline` + `anchor`, no `destOutline`). For block-level moves the result shape differs
 only in whether the two docs differ; doc-level `move` has its own shape (`outline` +
 stored-title/`hpath` echo, no `destOutline` — its decision record above). Cost: one extra `getChildBlocks`
@@ -1121,9 +1109,7 @@ duplicate doc, never a silent clobber.
      `unlocked: false`, `closed: true` (`model/box.go`). The `encrypted: true` flag is
      therefore always present in `lsNotebooks` output regardless of lock state, so the
      single rejection catches both — **no "locked → dropped as a stale notebook ID"
-     branch exists or should be built** (the earlier claim that the kernel skips locked
-     boxes from the listing was a misread; both encodings fail safe, but only the flag
-     check is real). Encryption is per-notebook — the kernel's
+     branch exists**. Encryption is per-notebook — the kernel's
      `/api/notebook/createEncryptedNotebook` mints one encrypted box with its own
      per-box sqlcipher database while `createNotebook` stays unencrypted — so a mixed
      workspace (one encrypted KB alongside plain KBs) is a normal, easily-constructed
@@ -1166,17 +1152,15 @@ duplicate doc, never a silent clobber.
   `ctx.hasUI: true` in RPC mode because the dialog methods are functional via that
   sub-protocol. The safety property does not rest on that source-read: **every confirm
   carries a timeout and every non-answer — an ignored request, a dismissal, a thrown
-  dialog call, a timeout expiry — auto-resolves to refused**, so even if the
+  dialog call, a timeout expiry — auto-resolves to refused** (fail-closed by
+  construction, and never a deadlocked turn on a blocking dialog), so even if the
   sub-protocol claim is wrong or drifts, an RPC write degrades to refused, never to
-  unattended writes. A live RPC integration pin was considered and cut: it would test
-  convenience, not safety — the dangerous direction (a write landing unconfirmed) is
-  fail-closed by the extension's own construction, and the only scenario that widens
-  the path is pi auto-answering `confirmed: true`, a harness bug no extension-side test
-  prevents. The sub-protocol behavior is checked once, manually, at first real RPC use
-  (§10 residual checklist). The extension therefore passes a **timeout on every
-  confirm dialog**: a timeout expiry or an explicit client cancellation auto-resolves
-  to refused — fail-closed in every direction, and never a deadlocked turn on a
-  blocking dialog. The timeout value is the
+  unattended writes — a full client behaves like an interactive session with a remote
+  confirm UI, a minimal one degrades to refused writes. A live RPC integration pin was
+  considered and cut: it would test convenience, not safety — the only scenario that
+  widens the path is pi auto-answering `confirmed: true`, a harness bug no extension-side
+  test prevents. The sub-protocol behavior is checked once, manually, at first real RPC
+  use (§10 residual checklist). The timeout value is the
   **`pi-kb.writeConfirmTimeout`** setting (seconds, default 60 — pinned, not invented
   per implementer; this is the disruption-vs-oversight dial, so it is user-owned rather
   than a constant): `0` waits **indefinitely** (the dialog blocks the write until
@@ -1191,15 +1175,7 @@ duplicate doc, never a silent clobber.
   `refused` — the user answered, so re-asking a rephrased variant is legitimate. The two
   settings stay orthogonal: `writeConfirmTimeout` is how long to hold the dialog,
   `allowUnattendedWrites` is whether to ask at all (headless); never-asked is a typed
-  opt-out in settings, never a side effect of a timeout value. The two RPC client shapes
-  collapse to the same safety boundary: a full client (implements the UI sub-protocol)
-  behaves like an interactive session with a remote confirm UI; a minimal client that
-  ignores or dismisses the request yields `confirmed: false`/timeout ⇒ write refused —
-  degraded convenience, never a silent widening of the write path (this holds by
-  construction — timeout + non-answer ⇒ refused — so a wrong protocol read is visible
-  as refused writes, not as silent writes; the mocked §10 suite pins the extension's
-  fail-closed branches, and the sub-protocol itself gets the one manual check in the
-  §10 residual checklist). The rejected-write message
+  opt-out in settings, never a side effect of a timeout value. The rejected-write message
   names the enabling setting or the interactive path. Silence never grants unattended
   writes; the opt-out is typed, in settings. (A per-session confirmation toggle was
   considered and cut: `allowUnattendedWrites` already covers the only real opt-out —
@@ -1312,8 +1288,8 @@ duplicate doc, never a silent clobber.
     two-session 3+3 case, §9, or any other client on the shared IP can trip the lock),
     so counting it would degrade a healthy session for someone else's mistake, and the
     breaker stays strictly a 401/403 mechanism. It is also **never auto-retried** (§2's
-    client rule; a retry during an active lock extends the lock — the exact runaway loop
-    the breaker exists to prevent, reachable here with a perfectly correct token). The
+    client rule; the lock-extension multiplier below makes a retry the exact runaway
+    loop the breaker exists to prevent, reachable here with a perfectly correct token). The
     **Structural guard (decision record)**: a message alone re-creates the "agent
     discipline" pattern the design rejects everywhere else — a model that retries the
     refused tool makes a real kernel call each time, and every call during an active lock
@@ -1373,8 +1349,8 @@ duplicate doc, never a silent clobber.
     human-paced* recovery act — at most one extra kernel-side auth failure per deliberate
     keystroke, never a loop the code or the model can spin. It is the sanctioned exception,
     not a relaxation of the rule.
-    **Ordering matters during an active kernel lock**: locked-out requests extend the lock
-    (§5 429 record), so repeated `/kb` re-checks make recovery strictly worse — the
+    **Ordering matters during an active kernel lock**: repeated `/kb` re-checks make
+    recovery strictly worse (the lock-extension multiplier, 429 record above), so the
     degraded-state message says **wait out the lock first, then `/kb`** (the 429 refusal
     already carries the self-healing expiry note). Session restart remains the alternate
     recovery path.
@@ -1396,11 +1372,9 @@ duplicate doc, never a silent clobber.
     who wants it. The key is optional: an **absent `defaultKBs` resolves to an empty
     active set, identical to `[]`** — there is no implicit activate-all; blast radius is
     always explicitly declared.
-  - **Project vs global settings (decision record)**: pi's settings merge is a deep merge
-    for plain objects but **replaces arrays wholesale** (project value wins, global array
-    gone — observed in pi's `settings-manager.ts` `isMergeableObject`; a source-read,
-    no longer load-bearing now that the extension reads files per key, below). The config
-    split follows that grain instead of fighting it:
+  - **Project vs global settings (decision record)**: pi's settings merge replaces arrays
+    wholesale (details under the read path, below). The config split follows that grain
+    instead of fighting it:
     - **Read path (pinned)**: pi exposes no settings API to extensions (`ExtensionContext`
       in `extensions/types.ts` carries no settings field), so the extension reads the
       settings files itself — and which file it reads *per key* is the enforcement
@@ -1554,7 +1528,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | UI rename / hand edits to KB docs | Medium (normal usage) | Safe by construction (§4 R5): identity is the docId, block IDs survive renames, and the doc stays reachable from any query row — every read/write by echoed docId works regardless of retitles. Worst case: a retitled doc no longer matches an agent's remembered mint title, so the next create by that title misses the guard — one reconcilable duplicate, never data loss (the accepted two-docs-reconcilable path). Write confirmation and result-echo keep it visible. No rename-detection machinery exists or is needed; no slug janitor exists (R5 — nothing to repair without a slug convention). |
 | Concurrent pi sessions on one KB | Normal usage, not degenerate | Two sessions can both pass the title guard before either create lands in the SQL index → duplicate topics; interleaved appends are last-writer-wins. Same "two docs, reconcilable later" blast radius as guard misses — never data loss. Verified-create is a by-ID mint assert (§4 R3), not a uniqueness check, so the race surfaces as a reconcilable duplicate, not an immediate error. A racing session's deletions also make stale targets reachable; the §4 stale-target record covers them — never a silent success against a vanished block. Interleaved overwrites are covered too: an `edit`/`replace-section` targeting content another session or the user changed since the agent last saw it hits the §4 fresh-content precondition — a `stale_content` refusal with the current content attached, never a silent clobber; the residue is the millisecond re-check→apply window the record names. No cross-session locking in v1. |
 | SQL-index lag after write breaks find-then-write | Low | If the index lags, the title guard misses → create path → duplicate doc. Verified-create is now a **by-ID assert that proves mint success** (§4 R3), not a uniqueness check — it cannot make the guard→create race visible; that race's duplicate is the accepted reconcilable class (§6, §4 R4). The same lag applies to the advisory backlink checks — the pre-write confirmations and the `invalidRefs` echo (§4) — which is why they are evidence, not proof, and never a safety gate. The design's defense stays fail-loud where the kernel is silent and reconcilable-never-lossy elsewhere. §10's read-consistency test pins the sync-flush contract for `blocks` and `refs` alike. |
-| Encrypted KB notebook | Low (opt-in feature, rejected loudly at startup) | `/api/query/sql` sees only the global `siyuan.db`; an encrypted notebook's blocks live in a separate per-box sqlcipher database and are invisible to the title guard, to verified-create's by-ID asserts, and to the backlink check — the §4 flow would misfire (guard misses minting duplicates; verified-create then fails loud on a mint the SQL surface cannot see). §5 validation step 3 rejects any configured KB with `encrypted: true` at `session_start`, naming the KB, so the flow never runs against a notebook it cannot see. Locked and unlocked encrypted notebooks surface identically: `lsNotebooks` reports `encrypted: true` with `unlocked: false` for locked boxes (verified at 3.8.2 — the kernel does not hide locked boxes from the listing), so the single flag check covers both states and no stale-ID drop branch exists. The `lsNotebooks` encryption-state source-read is pinned live by the §10 encrypted-notebook case, which runs on a disposable workspace — enabling the master-password key domain on the user's live workspace just to test would be deployment damage. |
+| Encrypted KB notebook | Low (opt-in feature, rejected loudly at startup) | `/api/query/sql` sees only the global `siyuan.db`; an encrypted notebook's blocks live in a separate per-box sqlcipher database invisible to the title guard, verified-create's by-ID asserts, and the backlink check — the §4 flow would misfire (guard misses minting duplicates; verified-create fails loud on a mint the SQL surface cannot see). §5 validation step 3 rejects any configured KB with `encrypted: true` at `session_start`, naming the KB — one flag check covering both lock states (§5 one-rejection pin), pinned live by the §10 encrypted-notebook case on a disposable workspace (enabling the master-password key domain on the live workspace just to test would be deployment damage). |
 | Dual writer on the workspace | Low (user-controlled) | §7's serialization argument covers the kernel's own writes only; if the same workspace is also opened in a desktop SiYuan instance while the kernel runs, torn writes are back. Mitigation is deployment hygiene: one kernel per workspace; worth a note in the compose docs. |
 | Spill files accumulate in /tmp | Low (cosmetic) | No cleanup machinery (§3): hash-named files in per-session temp dirs, disk-bounded by spill frequency, wiped by the OS on reboot; crash or quit-then-resume leaves files the resumed transcript may quote — the agent re-queries and re-spills (same hash). A cleanup pass is a v2 add-on if /tmp usage ever matters. |
 
@@ -1636,8 +1610,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     approval → `stale_content` refusal with the current content and fresh outline
     attached and **no kernel write call fired** (asserted on a request log); a matching
     re-check proceeds normally; `replace-section` baselines the walk-enumerated delete
-    set's content, and the confirmation displays it (the delete-set content read and
-    the baseline are one query);
+    set's content, and the confirmation displays it;
   - auth circuit breaker — 3 consecutive auth failures → degraded, zero further kernel
     calls from tool calls; recovery (a corrected token in settings plus a `/kb` dispatch
     re-runs the full validation pass, clears the degraded flag and counter, and calls
@@ -1933,10 +1906,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     not the message); then wait out the `Retry-After` the lockout asserted and assert the next
     correctly-authenticated call succeeds with no recovery step (the §5 self-healing
     expiry; the wait follows the header, not the base constant — the interleaved
-    request extends the lock, §5). **Ordering: the lock is
-    per-IP, so this case 429s every other kernel call from the VM while active — it runs
-    after all other kernel-dependent cases and before the raw-DELETE case, and ends by
-    waiting out the backoff so the lock is expired before the case that follows.**
+    request extends the lock, §5). **Ordering: runs after all other kernel-dependent
+    cases** (Execution order above — the per-IP lock 429s every other kernel call from
+    the VM while active).
     **Cost: expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
     by the *extended* lock, not the served `Retry-After`: the interleaved request
     extends the lock, and its 429 header was computed before the extension, so the
@@ -1944,8 +1916,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - query read-only end to end: a raw `DELETE` via `/api/query/sql` without `mode`
     mutates siyuan.db, while the same statement through the tool is parser-rejected and
     every tool-issued statement carries `mode: "readonly"` (defense-in-depth pin). This
-    case desyncs siyuan.db from blocktree.db until a reindex, so it runs **last** in the
-    integration suite (after the auth-throttle pin has waited out the backoff) and follows the deletes with a kernel reindex (the same sanctioned
+    case desyncs siyuan.db from blocktree.db until a reindex, so it runs **last**
+    (Execution order above) and follows the deletes with a kernel reindex (the sanctioned
     rebuild SY-FORMAT.md §0.5 describes), bounding any leakage to its own run;
   - encrypted-notebook contract pin (§5 — the startup rejection that guards the
     never-silently-wrong invariant rests on a `model/box.go` source-read; this case
@@ -1956,17 +1928,15 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     one encrypted notebook via `/api/notebook/createEncryptedNotebook` and one plain
     notebook, then asserts: `lsNotebooks` reports `encrypted: true` for the encrypted box
     while unlocked **and** after it is locked again (kernel `LockBox` — `unlocked: false`;
-    the always-present-flag pin, and the live falsifier of the earlier claim that locked
-    boxes vanish from the listing — a kernel upgrade that starts hiding them turns this
-    red instead of the guard going blind); `session_start` validation rejects the
+    the always-present-flag pin — a kernel upgrade that starts hiding locked boxes turns
+    this red instead of the guard going blind); `session_start` validation rejects the
     configured encrypted KB naming it while the plain KB validates clean; and no SQL
     query from the extension ever targets the encrypted box. Teardown is workspace
     disposal — no `removeNotebook` against encrypted boxes required.
   - search request shape: `paths`-derived scoping genuinely narrows results (guards the
-    silently-ignored-field degradation, §3). **Run this case first among the integration
-    tests** — it is the cheapest falsifier of a load-bearing assumption (the request shape
-    everything search-scoping rests on), and the failure mode it guards is silent
-    (whole-workspace results, not an error). A no-code precursor works before any
+    silently-ignored-field degradation, §3). **Runs first** (Execution order above) —
+    the failure mode it guards is silent (whole-workspace results, not an error).
+    A no-code precursor works before any
     implementation exists: two `curl` calls against the live kernel with the real API token
     (held on the host, not in the VM — run from the host or paste the token), one
     correctly-shaped `paths` call expected to return only fixture-box rows, one
