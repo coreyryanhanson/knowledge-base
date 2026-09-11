@@ -690,7 +690,7 @@ for the identity property.
      not accidental: the alternative (excluding trailing content) is rejected because
      the replacement then appends at doc end *after* the surviving fragments, which sit
      under a section the agent believes it fully rewrote; sweeping is the coherent
-semantic. Because the inline outline is heading-only (§3), trailing content is
+     semantic. Because the inline outline is heading-only (§3), trailing content is
      otherwise invisible at decision time — which makes the final-section sweep the one
      place a write can destroy content the agent never saw. The sweep stays (the
      excluded-content alternative produces the incoherent doc-end-fragments state
@@ -943,13 +943,13 @@ tool's job — the same verified-not-trusted doctrine as `newBlockId`:
 
 Cost: one content read per overwrite-bearing write plus one re-read after the
 confirmation — both single SQL reads over IDs already in hand. The `replace-section`
-baseline read doubles as the delete-set content display (below), so it adds no second
+baseline read doubles as the delete-set content display (above), so it adds no second
 query. Pinned by unit cases and a live integration case (§10).
 
 **Write-result contract (pinned)**: every doc-targeting write result carries the fields
 below — `outline`/`anchor`/`newBlockId` on every result that has a doc to outline,
 `invalidRefs` on delete-bearing writes — all built from data the write flow already has
-in hand; the only added round-trip is the outline fetch (documented `getChildBlocks`, the
+in hand; the added round-trips are the outline fetch (documented `getChildBlocks`, the
 same call the §3 `read` outline uses, same spill budget, same helper). Every create and
 write result
 additionally echoes the doc's **root `docId`, stored title, and real `hpath`** from the
@@ -1564,7 +1564,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   dialect, exact-pinned — §3 query scoping) in `pi-kb` is the one runtime dependency —
   `siyuan-core` stays zero-dep.
 - **Unit**: `siyuan-core` client tested with mocked `fetch` — request shapes, auth header,
-  error mapping, version check.
+  error mapping, version fetch (the core holds no gate — §2 ownership).
 - **Unit (extension layer)**: the risky logic lives in the extension, not the client, so the
   extension gets its own suite with a mocked `siyuan-core`, covering:
   - title guard (§4 R3) — the exact leg (ASCII-cased variant matches transparently;
