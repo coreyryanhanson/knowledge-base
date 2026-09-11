@@ -691,10 +691,15 @@ for the identity property.
      the replacement then appends at doc end *after* the surviving fragments, which sit
      under a section the agent believes it fully rewrote; sweeping is the coherent
 semantic. Because the inline outline is heading-only (§3), trailing content is
-     otherwise invisible at decision time — the write confirmation therefore displays
-     the enumerated delete set's block count, **the delete set's current content** (one
+     otherwise invisible at decision time — which makes the final-section sweep the one
+     place a write can destroy content the agent never saw. The sweep stays (the
+     excluded-content alternative produces the incoherent doc-end-fragments state
+     rejected above), but it is never an unseen deletion: trailing content is part of
+     the delete set, so the write confirmation therefore displays
+     the enumerated delete set's block count, **the delete set's current content** —
+     including the final section's trailing blocks (one
      content read over the enumerated IDs — the same read the fresh-content
-     precondition's baseline uses, below, so the visibility costs no second query), and
+     precondition's baseline uses, below, so the visibility costs no second query) — and
      the same backlink visibility the
      `delete` mode's confirmation carries: the `delete` mode's `refs` query (§4,
      `SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)`) runs over every
@@ -1655,7 +1660,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     AFK retry-treadmill pin), and an explicit `confirmed: false` decline stays
     recoverable `refused`; `writeConfirmTimeout: 0` issues the confirm with no timeout
     (blocks until answered); a `replace-section` confirmation on a final section displays the enumerated delete
-    set's block count plus the inbound-ref count and referring doc hpaths over the
+    set's block count, **the trailing blocks' current content** (the never-unseen-sweep
+    pin — the agent sees the exact text the final-section boundary will delete before
+    approving), plus the inbound-ref count and referring doc hpaths over the
     walk-enumerated delete set (the §4 visibility fixes for trailing content the
     heading-only outline can't show and for refs into section content), and the
     delete-bearing results carry `invalidRefs` (§4 write-result contract);
@@ -1747,7 +1754,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     second variant runs the same replacement against a doc with trailing non-heading
     content after the final heading and asserts the trailing block is deleted with the
     section (the §4 final-section boundary pin), the new body lands at doc end, and the
-    heading ID survives. A third variant plants a block ref from another fixture doc
+    heading ID survives; a mocked assertion pins that the confirmation for this shape
+    displayed the trailing block's content before the delete (the §4 never-unseen-sweep
+    pin — deletion of never-shown content is the failure this guards). A third variant plants a block ref from another fixture doc
     into a *content block inside the section* (not the heading — the same citation
     surface `edit`'s `blockId` is sourced from): the confirmation surfaced the
     inbound-ref count and referring doc hpath before the replace, and afterward the
@@ -2039,6 +2048,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Search transport | Named exception for `/api/search/fullTextSearchBlock` | SQL `content LIKE` only; MCP transport | §2, §3 |
 | Delete safety | Backlink check over the walk-enumerated delete set via documented SQL on `refs` | Guess from outline; separate backlinks tool | §4 |
 | Replace-section ref visibility | Pre-write refs count in the confirmation + post-write `invalidRefs` echo | Ref-preserving section rewrite (pairing heuristic) | §4, §10 |
+| Final-section trailing sweep | Sweep stays (exclusion leaves incoherent doc-end fragments under a supposedly-rewritten section); trailing content rides the delete-set content display, so it is never destroyed unseen | Excluding trailing content from the delete set; outline redesign to carry trailing blocks | §4, §10 |
 | Write-back tool schema | Targets agent-supplied from echoed data; anchors always tool-derived; `markdown` XOR `markdownFile`; result echoes fresh outline + address | Agent-supplied anchors; multi-call replace-section; inline-only bodies | §4 |
 | Guard-stop draft staging | Stage inline body to spill dir on guard stop; retry via `stagedPath` | Inline full-body retry; draftRef state with TTL; check-before-draft tool | §4, §10 |
 | Stale targets | Verified, not trusted: post-write walk-set evidence for every write result | Trust the kernel's HTTP result; agent re-read discipline | §4, §10 |
