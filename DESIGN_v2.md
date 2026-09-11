@@ -910,12 +910,20 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   it went (accepted placement quirk; the alternative — anchoring `previousID` to the
   heading's last block — needs a non-heading enumeration for a rare shape and is
   deliberately not built).
-- **`newBlockId`** — the inserted block's ID (insert/append/replace-section modes), the
-  kernel call's return value; it is the ready target for a follow-up `edit` without a
-  `query` round-trip. **Multi-block markdown (decision record)**: a body that parses to
+- **`newBlockId`** — the inserted block's ID (insert/append/replace-section modes); it is
+  the ready target for a follow-up `edit` without a `query` round-trip. **Response shape
+  (source-read at 3.8.2, pinned live by §10)**: the insert/append/prepend handlers return
+  `ret.Data = transactions` — a `[]*Transaction` envelope, not a block ID (`api/block_op.go`);
+  the minted ID is assigned during `PerformTransactions` (`insertedNode.ID = ast.NewNodeID()`,
+  `model/transaction.go`) and written back onto the returned operation
+  (`operation.ID = insertedNode.ID`), which serializes as `id` on the operation object —
+  so `newBlockId` is read from the first insert operation's `id` field
+  (`data[0].doOperations[0].id`), never from a top-level return field that does not exist.
+  **Multi-block markdown (decision record)**: a body that parses to
   N blocks mints N block IDs, and the kernel returns one representative ID whose choice
-  the tool does not assume (not source-read — the §10 multi-block pin converts the
-  return-value assumption into evidence, the same move as the search-shape pin). For a
+  the tool does not assume — the extraction path above is pinned by the §10 multi-block
+  case, which asserts the live response shape instead of trusting this source-read (the
+  same move as the search-shape pin). For a
   multi-block body `newBlockId` therefore addresses *one block of the appended content*,
   never "the whole thing I sent" — an agent that needs a different fragment of its own
   body re-locates it via the outline/`query` (echoed IDs, R1), the same route as editing
@@ -1795,8 +1803,11 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     paragraph followed by a list) yields a walk-set diff containing every newly-minted
     block ID with the kernel-returned `newBlockId` among them, and a single-block body
     yields a diff of exactly one ID — pinning both the diff-based verification and the
-    kernel's representative-ID choice against the real kernel (the return shape was not
-    source-read, so this test owns the claim);
+    kernel's representative-ID choice against the real kernel. The same case pins the
+    **response shape** (§4): `ret.Data` is the transaction array and the returned
+    `data[0].doOperations[0].id` equals the extracted `newBlockId` — if a kernel upgrade
+    changes the payload shape or stops echoing the minted ID, this goes red instead of
+    the extraction silently failing and write verification degrading to trusting `code: 0`;
   - guard-stop staging round-trip pin (§4): a large-body create stopped by the guard
     (`near_matches` against a fixture doc), then retried with `markdownFile:
     <stagedPath>` + `confirmNew: true`, mints successfully — and the doc's content read
@@ -1964,7 +1975,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Write-back tool schema | Targets agent-supplied from echoed data; anchors always tool-derived; `markdown` XOR `markdownFile`; result echoes fresh outline + address | Agent-supplied anchors; multi-call replace-section; inline-only bodies | §4 |
 | Guard-stop draft staging | Stage inline body to spill dir on guard stop; retry via `stagedPath` | Inline full-body retry; draftRef state with TTL; check-before-draft tool | §4, §10 |
 | Stale targets | Verified, not trusted: post-write walk-set evidence for every write result | Trust the kernel's HTTP result; agent re-read discipline | §4, §10 |
-| Multi-block markdown inserts | `newBlockId` = kernel's representative ID; verification = walk-set diff | Membership-only check; asserting the predicted full ID set | §4, §10 |
+| Multi-block markdown inserts | `newBlockId` = first insert operation's `id` from the returned transaction array (`data[0].doOperations[0].id`); kernel returns one representative ID; verification = walk-set diff | Membership-only check; asserting the predicted full ID set | §4, §10 |
 | Discovery recency echo | `updated` on every discovery row — data, not ordering | `ORDER BY updated DESC`; no recency signal | §3, §4, §5, §10 |
 | `confirmNew` escape hatch | Hidden from the input schema; bypasses both guard legs; confirmation + verified-create still apply | Declared optional param; exact leg unflaggable; user arbitration | §4, §10 |
 
