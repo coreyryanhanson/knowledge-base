@@ -67,8 +67,8 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
 - Pure SiYuan kernel HTTP API client + TypeScript types.
 - **Zero pi imports, zero runtime dependencies** (native `fetch`, hand-rolled types).
 - URL + token injected via config (never hardcoded — the deployment topology requires it).
-- Version check (`/api/system/version`) against a pinned, tested SiYuan version
-  (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-core`
+- Version fetch (`/api/system/version`); the pinned-version write gate lives in the
+  extension (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-core`
   exposes `getVersion()` — it fetches `/api/system/version` and returns the raw version
   string; it holds no pinned constant and enforces nothing. The **extension** owns
   `PINNED_SIYUAN_VERSION`, the strict-match policy, and the refusal message (§5); the
@@ -104,19 +104,15 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
   attempts (kernel/model/session.go:404, `Retry-After`; GHSA-m6w6-p7pc-fpg2 — the
   throttle constants and sweep live in kernel/util/session.go, cited in-source as
   GHSA-2x7j-p79w-7744; both advisories cover this throttle). The client maps
-  HTTP 429 distinctly from generic auth failure (one misconfigured session must not lock
-  the IP and degrade confusingly); the envelope message names the lockout and its self-healing
-  expiry — never "correct the token" (with a correct token that advice is wrong and invites
-  settings edits; the full guidance text is pinned in §5). A 429 can arrive with a **correct** token — the
-  lock is keyed by client IP and shared across clients, so another session's or client's
-  bad-token failures lock the VM's IP for everyone (the §5 two-session 3+3 case); the
-  extension's handling of that case is pinned in §5, not here. The lock is per-IP and
-  shared with the access-auth-code path — one VM is one client IP, so the client **never
-  retries 401/403/429** responses; a retry loop with a bad token would lock the VM out of
+  HTTP 429 distinctly from generic auth failure: a 429 can arrive with a **correct**
+  token — the lock is per-IP, shared across clients and with the access-auth-code path,
+  and one VM is one client IP (§5 has the full record, incl. the two-session 3+3 case)
+  — so the envelope never says "correct the token" and the client **never retries
+  401/403/429** responses; a retry loop with a bad token would lock the VM out of
   the kernel entirely. (And the client-side rule alone is not enough: the agent's own
   tool-call retries are the real retry loop — extension-side circuit breaker, §5.)
   The throttle's runtime contract is pinned by integration test, not assumed (§10
-  throttle case; §5 has the full record).
+  throttle case).
   Transient 5xx/timeouts on idempotent reads get a single retry; writes are never
   retried. **Every client call carries a hard timeout** (30 s, one constant — native
   `fetch` waits forever by default, and a hung kernel would hang the agent's turn): a
@@ -305,9 +301,7 @@ default and the per-KB search `pageSize`) and one helper.
      `GROUP BY`/`ORDER BY`/`LIMIT`.) (Note: the kernel has no index on `blocks(box)` —
      `box IN (...)` filters at the storage layer but still scans `blocks`; the
      correctness rationale, not a performance claim, is why injection is done this way.
-     The §4 title guard likewise matches `blocks.content`, which has no index: it is a
-     plain scan over the box's `type='d'` root rows — its LIMIT caps returned rows, not
-     scan work, which is fine at personal-workspace scale and indexable if it ever isn't.)
+     The §4 title guard's `blocks.content` scan is the same no-index case, argued there.)
   2. **Kernel executes with `mode: "readonly"`** (§2's second named exception) — a
      `sqlite3_stmt_readonly`-based check; even a certification bug cannot write
      siyuan.db.
@@ -891,7 +885,8 @@ SkipTx degenerate destinations (block moved before itself, parent into own desce
 are unreachable by tool-derived anchors — the tool never anchors a block relative to
 itself or into its own subtree, the same tool-side pre-check the doc-level move pins
 against `FilterMoveDocFromPaths`. The §10
-integration suite pins all four behaviors against the real kernel.
+integration suite pins these behaviors against the real kernel (the tree-level-miss
+branch may fall to the mocked suite — §10).
 
 **Fresh-content precondition (decision record)**: the stale-target record above covers
 targets that **vanish**; this record covers targets that **survive but changed**. An
@@ -1287,7 +1282,7 @@ duplicate doc, never a silent clobber.
   threshold would learn about it only from a locked-out VM).
   - **429 with a correct token (decision record)**: a 429 is **never counted toward the
     breaker** — it is not evidence that this session's token is wrong (the acknowledged
-    two-session 3+3 case, §9, or any other client on the shared IP can trip the lock),
+    two-session 3+3 case above, or any other client on the shared IP, can trip the lock),
     so counting it would degrade a healthy session for someone else's mistake, and the
     breaker stays strictly a 401/403 mechanism. It is also **never auto-retried** (§2's
     client rule; the lock-extension multiplier below makes a retry the exact runaway
@@ -1450,14 +1445,13 @@ duplicate doc, never a silent clobber.
     address). The discovery doctrine's ad-hoc SELECTs run against this table, so it gets
     the same no-guessing treatment as `refs`. Virtual mentions (text matches in `blocks_fts`) are intentionally out of reach —
     they are not identity refs and are irrelevant to delete safety. It also pins the
-    **include-`hpath` discovery pattern**: `hpath`, `root_id`, and `updated` are columns
+    **include-`hpath` discovery pattern** (the §3 echo contracts and the §4 recall loop
+    ride it): `hpath`, `root_id`, and `updated` are columns
     on every
     block row (`batchUpdateHPath` stamps the doc-level path on all rows;
     `updated` is the kernel's `yyyymmddhhmmss` per-block timestamp — sorts lexically, so
-    no parsing machinery ever exists), so a SELECT
-    that includes them returns each block's doc address and its recency for free —
-    `read { kb, docId:
-    root_id }` consumes the echoed id directly with zero intermediate calls. Only ids
+    no parsing machinery ever exists), so a discovery SELECT returns each block's doc
+    address and its recency for free. Only ids
     from sources that predate the pattern (older spill files, hand-off context) pay the
     one ownership query (§3 read), which is the scoping check itself.
 - **Why not `pi-tool-masking` for scope state**: its state namespace is tool *allowlists*
@@ -1650,8 +1644,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     delete-bearing results carry `invalidRefs` (§4 write-result contract);
   - status-slot rendering (glyph per probe state, headless-safe);
   - version-gated write refusal (probe failure must fail closed for writes; also covers
-    a version mismatch from the pinned full version — the refusal path additionally has
-    an honest integration form, below);
+    a version mismatch from the pinned full version — the refusal path is exercised live
+    by the version-refusal contract pin below);
   - the per-write-attempt first-write probe retry;
   - file-path write input (§4 decision record) — a missing/unreadable `markdownFile` →
     structured `error` naming the path with **no kernel call fired** (asserted on a
@@ -1835,18 +1829,15 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     truncation marker counting post-filter rows) is exercised in the mocked unit suite,
     where out-of-scope rows can be supplied; plus a **recall-loop echo assertion** (the
     §3 echo contract): a two-fixture search hit's row carries `root_id`, `box`, the
-    per-row resolved KB name, and a non-empty `updated` matching `\d{14}` — the
-    source-read pins say the FTS projections select `updated` verbatim and
-    `fromSQLBlock` copies it through (`model/search.go:2479`, `:3094`), but the row JSON,
-    not the Go struct, is the contract the extension consumes, so the claim is pinned
-    against the live kernel like every other shape claim — and `read { kb, docId: root_id }`
-    on that hit succeeds —
+    per-row resolved KB name, and a non-empty `updated` matching `\d{14}` — the row
+    JSON, not the Go struct, is the contract the extension consumes, so the §3
+    source-read is pinned against the live kernel like every other shape claim — and
+    `read { kb, docId: root_id }` on that hit succeeds —
     the `search → read` loop the recall harness rides is mechanically valid, not assumed;
   - **two-KB search saturation pin** (§3 per-KB fan-out): with both fixtures active, plant a
-    shared query term densely in fixture A (past the shared limit) and once in fixture B →
-    assert B's hit arrives with no `post_filtered` flag. Under a single-call union search
-    this fails silently — one `pageSize` fills with A's rows, B's row is dropped pre-filter
-    where neither the backstop nor the truncation marker can see it — so the case proves the
+    shared query term densely in fixture A (past `RESULT_LIMIT`) and once in fixture B →
+    assert B's hit arrives with no `post_filtered` flag — under a single-call union search
+    this is the row that silently vanishes (the §3 failure mode), so the case proves the
     fan-out, not the shape (pinned separately above); a second assertion densifies past the
     limit in *both* fixtures → the aggregate `truncated` marker names both KBs (per-call
     accounting, merged envelope, §3). Runs on the deterministic two-KB workspace the fixture
@@ -1892,9 +1883,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     the version-refusal envelope naming both versions and reads still proceed (the
     permissive-reads half of the §2 mismatch behavior). Refused writes touch no kernel
     state, so the case is fixture-neutral; the pin override is per-test config, not a
-    global constant mutation. (Supersedes the doc's earlier claim that the refusal path
-    "has no honest integration form" — that reasoning assumed the only way to create a
-    mismatch is to alter the kernel's report, but the test controls the other operand.)
+    global constant mutation.
   - auth-throttle contract pin (§5 — the constants the circuit breaker is tuned against
     are source-read; this case converts them into observed behavior, the same
     assumption-into-evidence move as the search-shape pin below): fire 6 bogus-token
@@ -1905,10 +1894,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     with the lock still active, make a further kb tool call and assert the cooldown
     refusal — `{status: refused}`, lockout message, and **no kernel request issued**
     (empty test-harness request log for the refusal — the structural guard is proven,
-    not the message); then wait out the `Retry-After` the lockout asserted and assert the next
+    not the message); then wait out the lock and assert the next
     correctly-authenticated call succeeds with no recovery step (the §5 self-healing
-    expiry; the wait follows the header, not the base constant — the interleaved
-    request extends the lock, §5). **Ordering: runs after all other kernel-dependent
+    expiry; the wait is bounded by the *extended* lock, which the served `Retry-After`
+    understates — Cost below, §5 429 record). **Ordering: runs after all other kernel-dependent
     cases** (Execution order above — the per-IP lock 429s every other kernel call from
     the VM while active).
     **Cost: expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
@@ -1985,7 +1974,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | --- | --- | --- |
 | 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
 | 1 | Repo scaffold — monorepo or two dirs, `siyuan-core` package skeleton, settings schema | `vitest` runs green on trivial test |
-| 2 | `siyuan-core` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists (the *tool-path* case lands with the extension at M3); the **auth-throttle contract pin** included, ordering per §10; **search `paths`-shape pin runs first** — cheapest falsifier, guards the silent whole-workspace-degradation failure mode §3 search-scoping rests on; a no-code precursor — two `curl` calls from the host — can run before any client code exists) |
+| 2 | `siyuan-core` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists, its *tool-path* case landing with the extension at M3; the auth-throttle contract pin and the search `paths`-shape pin included — execution order and the host-side `curl` precursor per §10) |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
