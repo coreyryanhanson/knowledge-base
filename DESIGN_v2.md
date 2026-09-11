@@ -55,20 +55,20 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
 │  └─────────┬────────────┘  │        │  workspace data/            │
 │            │ library       │        │   └─ kb/ (.sy doc trees)    │
 │  ┌─────────▼────────────┐  │        │                             │
-│  │ siyuan-core          │  │        │                             │
+│  │ siyuan-kernel-api    │  │        │                             │
 │  │ (client + types)     │  │        │                             │
 │  └──────────────────────┘  │        │                             │
 └────────────────────────────┘        └──────────────────────────────┘
         Firecracker microVM                  host
 ```
 
-### `siyuan-core` (library-only)
+### `siyuan-kernel-api` (library-only)
 
 - Pure SiYuan kernel HTTP API client + TypeScript types.
 - **Zero pi imports, zero runtime dependencies** (native `fetch`, hand-rolled types).
 - URL + token injected via config (never hardcoded — the deployment topology requires it).
 - Version fetch (`/api/system/version`); the pinned-version write gate lives in the
-  extension (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-core`
+  extension (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-kernel-api`
   exposes `getVersion()` — it fetches `/api/system/version` and returns the raw version
   string; it holds no pinned constant and enforces nothing. The **extension** owns
   `PINNED_SIYUAN_VERSION`, the strict-match policy, and the refusal message (§5); the
@@ -248,7 +248,7 @@ default and the per-KB search `pageSize`) and one helper.
 - **query scoping (decision record)** — `kb` (array, §5) resolves to notebook IDs; the
   extension owns the `box IN (...)` predicate, the agent never writes `box` or knows IDs.
   Certification is **parser-based, not token-scanned**: `pi-kb` uses **`node-sql-parser`**
-  (SQLite dialect) — the extension's one runtime dependency (`siyuan-core` stays
+  (SQLite dialect) — the extension's one runtime dependency (`siyuan-kernel-api` stays
   zero-dep; scoping is policy, and §3 policy is extension-owned) — **pinned to the exact
   spike-verified version (`node-sql-parser@5.4.0`)**, same discipline as the §8 kernel
   pin: layer 1's AST certification and CTE rejection rest entirely on this library's
@@ -365,7 +365,7 @@ default and the per-KB search `pageSize`) and one helper.
   carries the fresh outline, so a post-write `read` is never needed just to regain
   valid targets and anchors.
 - Where the policy lives: the inline limit and spill mechanism are extension-owned (one
-  shared helper, the four constants above); `siyuan-core` stays policy-free — its query method takes
+  shared helper, the four constants above); `siyuan-kernel-api` stays policy-free — its query method takes
   `stmt` + `mode`, its search method takes an explicit `limit` parameter, and its read
   method takes only the doc `id` (§3 owns the entire read budget via preview + spill).
 
@@ -1071,7 +1071,7 @@ duplicate doc, never a silent clobber.
   `/kb <name> on|off` grammar is unparseable otherwise, §5 validation step 1);
   `writeConfirmTimeout` (seconds, default 60) is the write-confirmation dialog timeout —
   `0` waits indefinitely (§5 write-confirmation record);
-  `notebook` is the SiYuan notebook ID. Nothing is hardcoded: `siyuan-core` receives
+  `notebook` is the SiYuan notebook ID. Nothing is hardcoded: `siyuan-kernel-api` receives
   `baseUrl` + `token` as constructor args and has zero knowledge of IPs, env, or pi; the
   extension is the only layer that reads settings.json and injects them.
 - **Validation order (decision record)**: at `session_start`, three steps in fixed order:
@@ -1532,11 +1532,11 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 - **Stack**: TypeScript + vitest (pi-tbox precedent); `node-sql-parser@5.4.0` (SQLite
   dialect, exact-pinned — §3 query scoping) in `pi-kb` is the one runtime dependency —
-  `siyuan-core` stays zero-dep.
-- **Unit**: `siyuan-core` client tested with mocked `fetch` — request shapes, auth header,
+  `siyuan-kernel-api` stays zero-dep.
+- **Unit**: `siyuan-kernel-api` client tested with mocked `fetch` — request shapes, auth header,
   error mapping, version fetch (the core holds no gate — §2 ownership).
 - **Unit (extension layer)**: the risky logic lives in the extension, not the client, so the
-  extension gets its own suite with a mocked `siyuan-core`, covering:
+  extension gets its own suite with a mocked `siyuan-kernel-api`, covering:
   - title guard (§4 R3) — the exact leg (ASCII-cased variant matches transparently;
     HTML-special titles match via escape parity — pattern built from the HTML-escaped
     title, with `%`/`_` LIKE-escaped so they can't widen the scan), the space/hyphen/underscore
@@ -1680,7 +1680,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   two-KB search sweeps, the OR-precedence aggregate) need a deterministic two-KB workspace —
   not fixture + live notebooks, whose expectations would depend on live data and flake. The raw-DELETE case below deletes only
   fixture-created rows. Fixture lifecycle is test setup code calling the kernel API directly —
-  notebook management stays out of `siyuan-core` and the tool surface. The write path gets
+  notebook management stays out of `siyuan-kernel-api` and the tool surface. The write path gets
   dedicated cases here — it is the highest-stakes code in the project.
   **Execution order (summary of the pins scattered below)**: the search-shape case runs
   first (cheapest falsifier of the load-bearing request shape); every other
@@ -1751,7 +1751,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     successful insert leaves visible duplication, never loss;
   - `updateBlock` preserves block IDs — assert zero invalid refs via
     `/api/search/listInvalidBlockRefs` after an edit (route name per kernel/api/router.go; the route
-    is undocumented in API.md, so the test calls the kernel directly, not through `siyuan-core` —
+    is undocumented in API.md, so the test calls the kernel directly, not through `siyuan-kernel-api` —
     the §2 documented-endpoints rule is a client rule, not a test constraint);
   - `deleteBlock` orphan behavior on a referenced block;
   - fresh-content precondition live pin (§4): outline a fixture doc through the tool,
@@ -1973,8 +1973,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | # | Milestone | Gate |
 | --- | --- | --- |
 | 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
-| 1 | Repo scaffold — monorepo or two dirs, `siyuan-core` package skeleton, settings schema | `vitest` runs green on trivial test |
-| 2 | `siyuan-core` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists, its *tool-path* case landing with the extension at M3; the auth-throttle contract pin and the search `paths`-shape pin included — execution order and the host-side `curl` precursor per §10) |
+| 1 | Repo scaffold — monorepo or two dirs, `siyuan-kernel-api` package skeleton, settings schema | `vitest` runs green on trivial test |
+| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists, its *tool-path* case landing with the extension at M3; the auth-throttle contract pin and the search `paths`-shape pin included — execution order and the host-side `curl` precursor per §10) |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
@@ -1995,7 +1995,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Scope mechanism | Required `kb` param — array on read tools, single name on write-back | Hidden/optional scope defaulting to active set | §5 |
 | Scope activation | `/kb <name> on\|off` single-name idempotent toggle + `/kb all on\|off` | Multi-name set-replacement; agent-invocable activation tool | §5 |
 | `/kb` subcommands | Reserved set is just `all` (R5); bare `/kb` prints scope | `/kb repair`; separate top-level commands | §5 |
-| Version gate | Eager `session_start` probe, cached verdict; strict full-version write gate, reads warn-and-proceed; ownership split — `siyuan-core.getVersion()` fetches only, the extension owns `PINNED_SIYUAN_VERSION` + strict-match policy + refusal message | Major-only refusal; per-write probe; staleness re-probe; version pin inside the core | §2, §8, §10 |
+| Version gate | Eager `session_start` probe, cached verdict; strict full-version write gate, reads warn-and-proceed; ownership split — `siyuan-kernel-api.getVersion()` fetches only, the extension owns `PINNED_SIYUAN_VERSION` + strict-match policy + refusal message | Major-only refusal; per-write probe; staleness re-probe; version pin inside the core | §2, §8, §10 |
 | Doc addressing & discovery (R1/R2/R6, **supersedes the v1 title-as-primary-key doctrine**) | Echoed docId is identity; mint by title, discover by query/search, consume by ID | Name/hpath resolution; read-by-topic with docId fallback | §4 |
 | Create addressing (R3, **supersedes the v1 slug mint address**) | Title + stored-title guard on kernel ground truth; ground-truth submission path; verified-create by-ID asserts | Slug-hpath guard; slugifier as mint address | §4, §10 |
 | Title policy (R4, **supersedes the v1 "create determinism" claim**) | Four-tier taxonomy; accepted-duplicate tier; vector sidecar eventually primary | Claiming same-title identity determinism | §4, §6 |
