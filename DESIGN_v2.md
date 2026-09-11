@@ -72,7 +72,7 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
   exposes `getVersion()` — it fetches `/api/system/version` and returns the raw version
   string; it holds no pinned constant and enforces nothing. The **extension** owns
   `PINNED_SIYUAN_VERSION`, the strict-match policy, and the refusal message (§5); the
-  compose tag (§8) and the §10 setup assert are consumers of that constant, not owners.
+  compose tag (§8) and the §10 setup assert reference the same version, not owners.
   **Timing**: eager probe at
   `session_start`, verdict cached for the session — no write executes before a probe
   has succeeded, and probe failure (unreachable, error) also refuses writes
@@ -699,7 +699,9 @@ semantic. Because the inline outline is heading-only (§3), trailing content is
      the enumerated delete set's block count, **the delete set's current content** —
      including the final section's trailing blocks (one
      content read over the enumerated IDs — the same read the fresh-content
-     precondition's baseline uses, below, so the visibility costs no second query) — and
+     precondition's baseline uses, below, so the visibility costs no second query;
+     display rides the §3 spill budget — content past `PREVIEW_CHARS` spills to the
+     session dir with a pointer, same posture as every oversized result) — and
      the same backlink visibility the
      `delete` mode's confirmation carries: the `delete` mode's `refs` query (§4,
      `SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)`) runs over every
@@ -770,7 +772,7 @@ semantic. Because the inline outline is heading-only (§3), trailing content is
    - **`move` with `doc: true` (doc-level, decision record)** — moves the whole source doc
      under a new parent via **`/api/filetree/moveDocsByID`** (`fromIDs: [<sourceRootID>]`,
      `toID: <destination doc's docId>` — a parent doc — or the notebook ID when `toDocId`
-     is omitted, the un-nest case; S1: the path-based `/api/filetree/moveDocs` shapes are
+     is omitted, the un-nest case; the path-based `/api/filetree/moveDocs` shapes are
      rejected — `fromPaths: [<hpath>.sy]` fails `getBoxesByPathsStrict`'s
      `IsNodeIDPattern` check and `toPath` is ID-path semantics, so the ID endpoint
      eliminates the path shapes entirely; both root IDs are in hand from the ownership
@@ -820,7 +822,7 @@ union, one read, and zero tool-side state.
 | `edit` | `docId`, `blockId` | `docId` scopes and targets the doc (ownership query); `blockId` is an agent-supplied *target*, read off the inline outline or the `query` tool; a target is not an anchor — `previousID`/`nextID`/`parentID` anchors stay tool-derived (above) |
 | `replace-section` | `docId`, `headingId` | one tool call — the tool enumerates → inserts → deletes internally (above) |
 | `append` | `docId`, optional `headingId` | omitted → doc end (`appendBlock` on the doc root); with a heading → tool derives the `nextID` anchor from the outline |
-| `delete` | `docId`, plus `blockId` **or** `doc: true` | block-level = `deleteBlock`; `doc: true` = whole-doc delete via the documented `/api/filetree/removeDocByID` (S1 — the by-ID endpoint, no path shapes); the backlink check rides the write confirmation (§4 `delete` mode) |
+| `delete` | `docId`, plus `blockId` **or** `doc: true` | block-level = `deleteBlock`; `doc: true` = whole-doc delete via the documented `/api/filetree/removeDocByID` (the by-ID endpoint, no path shapes); the backlink check rides the write confirmation (§4 `delete` mode) |
 | `move` | `docId`, plus `blockId` **or** `doc: true`, `toDocId` (destination doc; omitted on `doc: true` → notebook root), optional `toHeadingId` (block-level only) | destination addressed by echoed docId (ownership-checked like every doc target); same-doc move = `toDocId` naming the source doc; the tool fetches the *destination* outline and derives the anchor — never agent-supplied (§4 `move` decision record); `doc: true` = doc-level move via `/api/filetree/moveDocsByID` (§4 doc-level decision record) |
 
 The split the table encodes: **targets** (which doc or block to touch) are agent-supplied,
@@ -907,7 +909,12 @@ tool's job — the same verified-not-trusted doctrine as `newBlockId`:
 - **Baseline**: for every overwrite-bearing write (`edit`, `replace-section`), the tool
   holds a baseline content hash per targeted block — the hash of the content **as the
   tool last served it this session** (outline lines carry content; `query` rows can
-  select it; write results refresh it). Served-content hashes live in a session-scoped
+  select it; write results refresh the map for blocks whose content the write result
+  actually carried). **Served content only**: a `newBlockId` target from a just-landed
+  write has no baseline (the submitted markdown is not the stored form — the kernel
+  re-parses it, and multi-block bodies make the mapping worse) — a follow-up `edit` on
+  such a target rides the no-baseline fallback below, not a hash of the agent's own
+  submission. Served-content hashes live in a session-scoped
   in-memory map — the same lifecycle class as the §5 breaker/cooldown state, never
   persisted (after resume/fork the map is empty and the fallback below applies).
 - **No served content this session** (target from an older spill file, hand-off
@@ -1326,7 +1333,7 @@ duplicate doc, never a silent clobber.
     lockout, its cause (IP-keyed lock, possibly tripped by another client), and its
     self-healing expiry (first kernel lock 60 s — `30 << (6-5)`; quote the kernel's
     `Retry-After` when present — with one
-    multiplier fact pinned, S2: any single call during an active lock **extends** the
+    multiplier fact pinned: any single call during an active lock **extends** the
     lock (locked-out requests themselves increment the counter, exponential backoff:
     FailCount 6 → 7 → 120 s), and the interleaved 429's `Retry-After` header is computed
     *before* that extension — so the served header understates the new lockout, and the
@@ -1705,7 +1712,14 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   not fixture + live notebooks, whose expectations would depend on live data and flake. The raw-DELETE case below deletes only
   fixture-created rows. Fixture lifecycle is test setup code calling the kernel API directly —
   notebook management stays out of `siyuan-core` and the tool surface. The write path gets
-  dedicated cases here — it is the highest-stakes code in the project:
+  dedicated cases here — it is the highest-stakes code in the project.
+  **Execution order (summary of the pins scattered below)**: the search-shape case runs
+  first (cheapest falsifier of the load-bearing request shape); every other
+  kernel-dependent case follows; the auth-throttle case runs after all of them and ends
+  by waiting out the extended lock; the raw-DELETE case runs last (it desyncs `siyuan.db`
+  until its reindex) and follows the throttle's expired backoff; the encrypted-notebook
+  case is exempt from this ordering — it runs on its own disposable workspace (separate
+  kernel data dir), never the shared one.
   - title-guard kernel round-trip (§4 R3 — the guard rides `blocks.content`, whose exact
     behavior no unit transcription can prove, so this is the mandatory live pin): create
     docs through the real kernel with adversarial titles — a tab-bearing title must be
@@ -1923,7 +1937,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     per-IP, so this case 429s every other kernel call from the VM while active — it runs
     after all other kernel-dependent cases and before the raw-DELETE case, and ends by
     waiting out the backoff so the lock is expired before the case that follows.**
-    **Cost (S2 correction): expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
+    **Cost: expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
     by the *extended* lock, not the served `Retry-After`: the interleaved request
     extends the lock, and its 429 header was computed before the extension, so the
     header understates the new lockout (§5 429 record);
