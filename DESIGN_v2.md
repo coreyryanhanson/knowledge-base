@@ -91,13 +91,12 @@ Following the validated `pi-tbox` → `pi-tool-masking` precedent, minus publish
   per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict — it is not
   staleness polling. The first-write probe retry when no probe has yet succeeded is
   specified with the unreachable-startup flow (§5).
-- Query/search methods take explicit `limit` parameters — the kernel API is
-  called exactly as the caller specifies; result-budget policy belongs to the extension
-  (§3), not the client. Exception: the query method takes `stmt` plus the read-only `mode` flag (§2's second
-  named exception, below) and **no** limit parameter — a client-side query limit could
-  only exist as SQL-text injection, which is the extension's job (§3); client-side
-  limits apply only
-  where the kernel API has a real field (search `pageSize`). The **read method takes
+- The search method takes an explicit `limit` parameter; the query method takes `stmt`
+  plus the read-only `mode` flag (§2's second named exception, below) and **no** limit
+  parameter — a client-side query limit could only exist as SQL-text injection, which is
+  the extension's job (§3). The kernel API is called exactly as the caller specifies;
+  result-budget policy belongs to the extension (§3), not the client; client-side limits
+  apply only where the kernel API has a real field (search `pageSize`). The **read method takes
   only the doc `id`** — `exportMdContent` (`kernel/api/export.go`) has no size field
   and returns whole docs; there is no kernel-side or client-side read limit, so the
   read budget (inline preview + spill) is entirely extension-owned (§3).
@@ -228,7 +227,9 @@ suffix); `read` spills are raw text (`.md` suffix — the payload is `exportMdCo
 GFM). The inline result keeps an **8000-char newline-boundary preview** plus
 `… N more — full result in <path>`, and the agent extracts what it needs with the native
 `read` (offset/limit) and grep — no paging protocol to invent, nothing is lost, only
-deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and one helper.
+deferred. Four constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`, and the
+shared limit constant `RESULT_LIMIT` — 64, serving as both the injected query LIMIT
+default and the per-KB search `pageSize`) and one helper.
 
 - **query** — the extension injects `LIMIT` into the statement when the AST shows it
   lacks one (default 64,
@@ -370,7 +371,7 @@ deferred. Three constants (`SPILL_DIR`, `PREVIEW_CHARS`, `OUTLINE_HEADINGS`) and
   carries the fresh outline, so a post-write `read` is never needed just to regain
   valid targets and anchors.
 - Where the policy lives: the inline limit and spill mechanism are extension-owned (one
-  shared helper, the three constants above); `siyuan-core` stays policy-free — its query method takes
+  shared helper, the four constants above); `siyuan-core` stays policy-free — its query method takes
   `stmt` + `mode`, its search method takes an explicit `limit` parameter, and its read
   method takes only the doc `id` (§3 owns the entire read budget via preview + spill).
 
@@ -943,8 +944,9 @@ and a live integration case (§10).
 **Write-result contract (pinned)**: every doc-targeting write result carries the fields
 below — `outline`/`anchor`/`newBlockId` on every result that has a doc to outline,
 `invalidRefs` on delete-bearing writes — all built from data the write flow already has
-in hand; the added round-trips are the outline fetch (documented `getChildBlocks`, the
-same call the §3 `read` outline uses, same spill budget, same helper). Every create and
+in hand; the added round-trip is the outline fetch (documented `getChildBlocks`, the
+same call the §3 `read` outline uses, same spill budget, same helper) — the contract's
+only second round-trip is the cross-doc `move`'s `destOutline`. Every create and
 write result
 additionally echoes the doc's **root `docId`, stored title, and real `hpath`** from the
 root row — the docId is the echoed target R1 requires and the input to
@@ -2004,7 +2006,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Scope mechanism | Required `kb` param — array on read tools, single name on write-back | Hidden/optional scope defaulting to active set | §5 |
 | Scope activation | `/kb <name> on\|off` single-name idempotent toggle + `/kb all on\|off` | Multi-name set-replacement; agent-invocable activation tool | §5 |
 | `/kb` subcommands | Reserved set is just `all` (R5); bare `/kb` prints scope | `/kb repair`; separate top-level commands | §5 |
-| Version gate | Eager `session_start` probe, cached verdict; strict full-version write gate, reads warn-and-proceed | Major-only refusal; per-write probe; staleness re-probe | §2, §8, §10 |
+| Version gate | Eager `session_start` probe, cached verdict; strict full-version write gate, reads warn-and-proceed; ownership split — `siyuan-core.getVersion()` fetches only, the extension owns `PINNED_SIYUAN_VERSION` + strict-match policy + refusal message | Major-only refusal; per-write probe; staleness re-probe; version pin inside the core | §2, §8, §10 |
 | Doc addressing & discovery (R1/R2/R6, **supersedes the v1 title-as-primary-key doctrine**) | Echoed docId is identity; mint by title, discover by query/search, consume by ID | Name/hpath resolution; read-by-topic with docId fallback | §4 |
 | Create addressing (R3, **supersedes the v1 slug mint address**) | Title + stored-title guard on kernel ground truth; ground-truth submission path; verified-create by-ID asserts | Slug-hpath guard; slugifier as mint address | §4, §10 |
 | Title policy (R4, **supersedes the v1 "create determinism" claim**) | Four-tier taxonomy; accepted-duplicate tier; vector sidecar eventually primary | Claiming same-title identity determinism | §4, §6 |
