@@ -663,7 +663,11 @@ for the identity property.
      fact, replacing a superseded paragraph). The inline outline carries heading IDs only;
      for a non-heading block the agent gets its ID from the `query` tool
      (`SELECT id FROM blocks WHERE root_id = ? AND …`) — the outline deliberately does not
-     carry every block ID (context bloat).
+     carry every block ID (context bloat). Because `updateBlock` overwrites content
+     wholesale, the fresh-content precondition (decision record, below) rides every
+     `edit`: the block's current content is re-checked against the baseline hash after
+     confirmation approval, and a concurrent rewrite surfaces as a `stale_content`
+     refusal — never a silent clobber of content the agent last saw in an older state.
    - **`replace-section`** — swap a section's body **in one tool call** (the tool
      enumerates → inserts → deletes internally; agent-orchestrated multi-call sequencing
      would re-expose the stale-enumeration hazard this ordering exists to avoid),
@@ -686,9 +690,12 @@ for the identity property.
      not accidental: the alternative (excluding trailing content) is rejected because
      the replacement then appends at doc end *after* the surviving fragments, which sit
      under a section the agent believes it fully rewrote; sweeping is the coherent
-     semantic. Because the inline outline is heading-only (§3), trailing content is
+semantic. Because the inline outline is heading-only (§3), trailing content is
      otherwise invisible at decision time — the write confirmation therefore displays
-     the enumerated delete set's block count, and the same backlink visibility the
+     the enumerated delete set's block count, **the delete set's current content** (one
+     content read over the enumerated IDs — the same read the fresh-content
+     precondition's baseline uses, below, so the visibility costs no second query), and
+     the same backlink visibility the
      `delete` mode's confirmation carries: the `delete` mode's `refs` query (§4,
      `SELECT DISTINCT root_id FROM refs WHERE def_block_id IN (...)`) runs over every
      ID in the walk-enumerated delete set, and the confirmation carries the
@@ -881,6 +888,51 @@ are unreachable by tool-derived anchors — the tool never anchors a block relat
 itself or into its own subtree, the same tool-side pre-check the doc-level move pins
 against `FilterMoveDocFromPaths`. The §10
 integration suite pins all four behaviors against the real kernel.
+
+**Fresh-content precondition (decision record)**: the stale-target record above covers
+targets that **vanish**; this record covers targets that **survive but changed**. An
+`edit`/`replace-section` whose target block still resolves but whose content was
+rewritten by a concurrent session or a UI hand-edit between the data the agent saw and
+the write it issues would overwrite the new content silently — `updateBlock` replaces
+content wholesale and no kernel-side compare-and-swap exists, and the §9 concurrent-sessions
+acceptance makes this normal usage, not a degenerate case. Existence verification
+cannot catch this class (the ID resolves), so the check is content, and it is the
+tool's job — the same verified-not-trusted doctrine as `newBlockId`:
+
+- **Baseline**: for every overwrite-bearing write (`edit`, `replace-section`), the tool
+  holds a baseline content hash per targeted block — the hash of the content **as the
+  tool last served it this session** (outline lines carry content; `query` rows can
+  select it; write results refresh it). Served-content hashes live in a session-scoped
+  in-memory map — the same lifecycle class as the §5 breaker/cooldown state, never
+  persisted (after resume/fork the map is empty and the fallback below applies).
+- **No served content this session** (target from an older spill file, hand-off
+  context, or a fresh session): the tool reads the target's **current** content at
+  call start (read-once, the file-path input record's pattern), shows it in the write
+  confirmation, and the confirmation approval establishes the baseline — the agent
+  approved the write with the current bytes in view.
+- **Precondition**: immediately before the kernel call (after confirmation approval),
+  the tool re-reads the targeted content and compares hashes — for `edit`, the target
+  block; for `replace-section`, the walk-enumerated delete set's content (one content
+  read over the enumerated IDs, the same documented SQL endpoint). Any mismatch →
+  `{status: refused, reason: stale_content}` with the current content and fresh
+  outline attached, no kernel write fired; the agent re-reads and re-targets. The
+  message says the content changed since it was last seen and names the re-read path —
+  never a retry instruction.
+- **Residue (named, not worked around)**: the re-check and the kernel apply are two
+  calls with no transaction spanning them, so a change landing between re-check and
+  apply still overwrites — the kernel offers no compare-and-swap, so the precondition
+  narrows the race from "the whole session" to "the milliseconds of the apply window".
+  The same accepted-residue class as the guard→create race (§4 R3).
+- **Scope**: only the two modes that silently overwrite content the agent believes it
+  knows carry the precondition. `append` and block/doc-level `move` touch no existing
+  content; block-level `delete` of a concurrently-edited block loses the new content
+  by definition (the agent asked for the block to be gone) — accepted last-writer-wins
+  at delete granularity, consistent with §9.
+
+Cost: one content read per overwrite-bearing write plus one re-read after the
+confirmation — both single SQL reads over IDs already in hand. The `replace-section`
+baseline read doubles as the delete-set content display (below), so it adds no second
+query. Pinned by unit cases and a live integration case (§10).
 
 **Write-result contract (pinned)**: every doc-targeting write result carries the fields
 below — `outline`/`anchor`/`newBlockId` on every result that has a doc to outline,
@@ -1084,7 +1136,7 @@ duplicate doc, never a silent clobber.
   | Guard stop — near-matches found | `near_matches` |
   | Guard stop — exact-title match(es) | `duplicate` |
   | Kernel call failed; verified-create/stale-target assertion failed; guard SQL errored; reads while the kernel is unreachable | `error` |
-  | Every refusal: version gate, circuit breaker / 429 cooldown, unreachable-kernel write refusal (failed probe retry), scope or `kb`-param rejection, shape validation, headless write default-deny, write-confirmation decline or `confirm_timeout` | `refused` |
+  | Every refusal: version gate, circuit breaker / 429 cooldown, unreachable-kernel write refusal (failed probe retry), fresh-content precondition (`stale_content`), scope or `kb`-param rejection, shape validation, headless write default-deny, write-confirmation decline or `confirm_timeout` | `refused` |
 
   The `message` distinguishes causes within a class (the 429 cooldown and the breaker
   share `refused` since both mean "no kernel calls will pass" — the message names which).
@@ -1488,7 +1540,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Scope confusion (soft isolation) | Low (accepted) | Named ceiling; hard isolation out of scope for v1. |
 | Git-on-host vs live workspace (user's personal backup) | User-owned | Extension is agnostic: it writes via kernel API regardless of what backs the workspace. Torn-write risk belongs to the backup strategy, not this design. Kernel API writes land on disk as `.sy` either way — git backs the workspace identically; direct file writes buy git nothing. |
 | UI rename / hand edits to KB docs | Medium (normal usage) | Safe by construction (§4 R5): identity is the docId, block IDs survive renames, and the doc stays reachable from any query row — every read/write by echoed docId works regardless of retitles. Worst case: a retitled doc no longer matches an agent's remembered mint title, so the next create by that title misses the guard — one reconcilable duplicate, never data loss (the accepted two-docs-reconcilable path). Write confirmation and result-echo keep it visible. No rename-detection machinery exists or is needed; no slug janitor exists (R5 — nothing to repair without a slug convention). |
-| Concurrent pi sessions on one KB | Normal usage, not degenerate | Two sessions can both pass the title guard before either create lands in the SQL index → duplicate topics; interleaved appends are last-writer-wins. Same "two docs, reconcilable later" blast radius as guard misses — never data loss. Verified-create is a by-ID mint assert (§4 R3), not a uniqueness check, so the race surfaces as a reconcilable duplicate, not an immediate error. A racing session's deletions also make stale targets reachable; the §4 stale-target record covers them — never a silent success against a vanished block. No cross-session locking in v1. |
+| Concurrent pi sessions on one KB | Normal usage, not degenerate | Two sessions can both pass the title guard before either create lands in the SQL index → duplicate topics; interleaved appends are last-writer-wins. Same "two docs, reconcilable later" blast radius as guard misses — never data loss. Verified-create is a by-ID mint assert (§4 R3), not a uniqueness check, so the race surfaces as a reconcilable duplicate, not an immediate error. A racing session's deletions also make stale targets reachable; the §4 stale-target record covers them — never a silent success against a vanished block. Interleaved overwrites are covered too: an `edit`/`replace-section` targeting content another session or the user changed since the agent last saw it hits the §4 fresh-content precondition — a `stale_content` refusal with the current content attached, never a silent clobber; the residue is the millisecond re-check→apply window the record names. No cross-session locking in v1. |
 | SQL-index lag after write breaks find-then-write | Low | If the index lags, the title guard misses → create path → duplicate doc. Verified-create is now a **by-ID assert that proves mint success** (§4 R3), not a uniqueness check — it cannot make the guard→create race visible; that race's duplicate is the accepted reconcilable class (§6, §4 R4). The same lag applies to the advisory backlink checks — the pre-write confirmations and the `invalidRefs` echo (§4) — which is why they are evidence, not proof, and never a safety gate. The design's defense stays fail-loud where the kernel is silent and reconcilable-never-lossy elsewhere. §10's read-consistency test pins the sync-flush contract for `blocks` and `refs` alike. |
 | Encrypted KB notebook | Low (opt-in feature, rejected loudly at startup) | `/api/query/sql` sees only the global `siyuan.db`; an encrypted notebook's blocks live in a separate per-box sqlcipher database and are invisible to the title guard, to verified-create's by-ID asserts, and to the backlink check — the §4 flow would misfire (guard misses minting duplicates; verified-create then fails loud on a mint the SQL surface cannot see). §5 validation step 3 rejects any configured KB with `encrypted: true` at `session_start`, naming the KB, so the flow never runs against a notebook it cannot see. Locked and unlocked encrypted notebooks surface identically: `lsNotebooks` reports `encrypted: true` with `unlocked: false` for locked boxes (verified at 3.8.2 — the kernel does not hide locked boxes from the listing), so the single flag check covers both states and no stale-ID drop branch exists. The `lsNotebooks` encryption-state source-read is pinned live by the §10 encrypted-notebook case, which runs on a disposable workspace — enabling the master-password key domain on the user's live workspace just to test would be deployment damage. |
 | Dual writer on the workspace | Low (user-controlled) | §7's serialization argument covers the kernel's own writes only; if the same workspace is also opened in a desktop SiYuan instance while the kernel runs, torn writes are back. Mitigation is deployment hygiene: one kernel per workspace; worth a note in the compose docs. |
@@ -1565,6 +1617,15 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     a cross-doc move whose `movedBlockId` is absent from the destination post-move walk
     set (or still present in the source's) → `status: error`, never a silent no-move
     success;
+  - fresh-content precondition (§4 decision record) — a baseline hash is recorded when
+    the tool serves a target block's content (outline-sourced target); no served
+    content this session → the current content is read at call start and shown in the
+    confirmation, and approval establishes the baseline; a content change after
+    approval → `stale_content` refusal with the current content and fresh outline
+    attached and **no kernel write call fired** (asserted on a request log); a matching
+    re-check proceeds normally; `replace-section` baselines the walk-enumerated delete
+    set's content, and the confirmation displays it (the delete-set content read and
+    the baseline are one query);
   - auth circuit breaker — 3 consecutive auth failures → degraded, zero further kernel
     calls from tool calls; recovery (a corrected token in settings plus a `/kb` dispatch
     re-runs the full validation pass, clears the degraded flag and counter, and calls
@@ -1701,6 +1762,12 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     is undocumented in API.md, so the test calls the kernel directly, not through `siyuan-core` —
     the §2 documented-endpoints rule is a client rule, not a test constraint);
   - `deleteBlock` orphan behavior on a referenced block;
+  - fresh-content precondition live pin (§4): outline a fixture doc through the tool,
+    then change a target block's content directly via the kernel (simulating a
+    concurrent session or a UI hand-edit), then issue the `edit` → the precondition's
+    re-read detects the hash mismatch and refuses with `stale_content` and the current
+    content attached, and the kernel content is untouched (asserted by re-read); a
+    control run with no intervening change applies normally;
   - stale-target contract pin (§4 — the four block-write ops disagree on missing IDs,
     and the insert path fails silently behind an HTTP success, so this cannot live in
     mocks alone): delete a fixture block directly via the kernel (simulating another
@@ -1975,6 +2042,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Write-back tool schema | Targets agent-supplied from echoed data; anchors always tool-derived; `markdown` XOR `markdownFile`; result echoes fresh outline + address | Agent-supplied anchors; multi-call replace-section; inline-only bodies | §4 |
 | Guard-stop draft staging | Stage inline body to spill dir on guard stop; retry via `stagedPath` | Inline full-body retry; draftRef state with TTL; check-before-draft tool | §4, §10 |
 | Stale targets | Verified, not trusted: post-write walk-set evidence for every write result | Trust the kernel's HTTP result; agent re-read discipline | §4, §10 |
+| Fresh-content precondition | Baseline content hash (served content, or confirmation-displayed content when none was served) re-checked post-confirm on `edit`/`replace-section`; mismatch → `stale_content` refusal with current content attached | Content-blind overwrite; agent re-read discipline; cross-session locking | §4, §9, §10 |
 | Multi-block markdown inserts | `newBlockId` = first insert operation's `id` from the returned transaction array (`data[0].doOperations[0].id`); kernel returns one representative ID; verification = walk-set diff | Membership-only check; asserting the predicted full ID set | §4, §10 |
 | Discovery recency echo | `updated` on every discovery row — data, not ordering | `ORDER BY updated DESC`; no recency signal | §3, §4, §5, §10 |
 | `confirmNew` escape hatch | Hidden from the input schema; bypasses both guard legs; confirmation + verified-create still apply | Declared optional param; exact leg unflaggable; user arbitration | §4, §10 |
