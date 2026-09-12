@@ -1212,11 +1212,9 @@ writes; the opt-out is typed, in settings.
   and closing it would need a shared-breaker file — machinery a single-user VM topology
   doesn't earn. Recovery re-checks with a still-wrong token add one kernel-side failure
   per typed `/kb`, so the human-paced argument covers them. The threshold numbers
-  themselves are source-read (`util/session.go`), and reading code proves existence, not
-  runtime behavior — so the throttle contract is pinned by the §10 integration throttle
-  case: a misread constant, or an upgrade that moves the threshold, turns the suite red
-  instead of silently mis-tuning the breaker (a breaker sitting above a lowered kernel
-  threshold would learn about it only from a locked-out VM).
+  are source-read (`util/session.go`) and pinned live by the §10 integration throttle
+  case (implemented and passing in the client's integration profile): an upgrade that
+  moves the threshold turns the suite red instead of silently mis-tuning the breaker.
   - **429 with a correct token (decision record)**: a 429 is **never counted toward the
     breaker** — it is not evidence that this session's token is wrong (the acknowledged
     two-session 3+3 case above, or any other client on the shared IP, can trip the lock),
@@ -1241,13 +1239,10 @@ writes; the opt-out is typed, in settings.
     the user-typed, human-paced act (§5 recovery), with the degraded-state message still
     saying wait out the lock first. The tool returns the distinct 429 envelope naming the
     lockout, its cause (IP-keyed lock, possibly tripped by another client), and its
-    self-healing expiry (first kernel lock 60 s — `30 << (6-5)`; quote the kernel's
-    `Retry-After` when present — with one
-    multiplier fact pinned: any single call during an active lock **extends** the
-    lock (locked-out requests themselves increment the counter, exponential backoff:
-    FailCount 6 → 7 → 120 s), and the interleaved 429's `Retry-After` header is computed
-    *before* that extension — so the served header understates the new lockout, and the
-    honest guidance is **wait out the lock with zero calls first, then retry**). The
+    self-healing expiry — quote the kernel's `Retry-After` when present; any call
+    during an active lock **extends** the lock and the served header understates the
+    extended lockout (pinned live by the §10 throttle case), so the honest guidance is
+    **wait out the lock with zero calls first, then retry**. The
     refusal message tells the model: your token is probably correct — do **not** change
     the token or settings, and do not retry; all kb calls are refused for the stated
     window; report the lockout to the user and pause kb work until then (the model cannot
@@ -1660,14 +1655,15 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     conscious-duplicate path, §4 decision record) → `delete {docId, doc: true}` on two
     → re-create without the flag hits the guard's exact leg and one doc remains;
   - verified-create, split into two cases (the kernel mints a duplicate on
-    create-on-existing-path, §4, so one test cannot assert both layers):
-    *kernel-contract pin* — a raw second `createDocWithMd` on an existing path →
-    re-lookup returns **exactly two** doc rows and the content landed in the *new* doc
-    (catches any SiYuan upgrade that changes the duplicate-minting behavior);
-    *tool-path test* — the extension's create flow against a pre-existing title → the
-    guard's exact leg matches first (no create call fires, the existing doc's docId is
-    returned), and the guard→create race is only reachable in the mocked suite — its
-    duplicate lands in the accepted reconcilable class (§4 R3/R4, §9);
+    create-on-existing-path, §4, so one test cannot assert both layers): the
+    *kernel-contract pin* is implemented and passing in the client's integration
+    profile (a raw second `createDocWithMd` on an existing path → exactly two doc
+    rows, content in the new doc — catches any upgrade that changes the
+    duplicate-minting behavior); the *tool-path test* (M3) — the extension's create
+    flow against a pre-existing title → the guard's exact leg matches first (no
+    create call fires, the existing doc's docId is returned), and the guard→create
+    race is only reachable in the mocked suite — its duplicate lands in the accepted
+    reconcilable class (§4 R3/R4, §9);
   - `insertBlock` with `nextID=<next heading>` lands where the outline says — including a
     section ending in a list/quote (the AST-sibling nesting trap, §4) and the
     final-section `appendBlock`-on-root case;
@@ -1828,36 +1824,21 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     permissive-reads half of the §2 mismatch behavior). Refused writes touch no kernel
     state, so the case is fixture-neutral; the pin override is per-test config, not a
     global constant mutation.
-  - auth-throttle contract pin (§5 — the constants the circuit breaker is tuned against
-    are source-read; this case converts them into observed behavior, the same
-    assumption-into-evidence move as the search-shape pin below; observed live on
-    3.8.3 by the M2 integration profile, `~/siyuan-kernel-api/integration.si.test.ts`):
-    fire 6 bogus-token requests against the real kernel — the kernel arms the lock on
-    the 6th failure and that request still returns 401 (`FailCount <= 5` passes;
-    `AuthThrottleFail` locks at 6) → assert the lockout surfaces as the distinct 429
-    class with `Retry-After` on the **7th** bogus request (the class the breaker
-    deliberately excludes); interleave
-    one correctly-authenticated request during the lockout and assert it receives the
-    same 429 (the shared per-IP lock, the §5 two-session 3+3 case exercised for real);
-    with the lock still active, make a further kb tool call and assert the cooldown
-    refusal — `{status: refused}`, lockout message, and **no kernel request issued**
-    (empty test-harness request log for the refusal — the structural guard is proven,
-    not the message); then wait out the lock and assert the next
-    correctly-authenticated call succeeds with no recovery step (the §5 self-healing
-    expiry; the wait is bounded by the *extended* lock — the last-extension response's
-    own `Retry-After` names it, headers served before that extension understate —
-    Cost below, §5 429 record). **Ordering: runs after all other kernel-dependent
-    cases** (Execution order above — the per-IP lock 429s every other kernel call from
-    the VM while active).
-    **Cost: expect ~4 minutes, not the first lock's 60 s** — locked requests
-    *overwrite* the lock, not add (`30 << (FailCount−5)`: 60 s at FailCount 6,
-    120 s at 7, 240 s at 8), so the in-test wait is bounded by the *last* extension,
-    not the sum of sequential locks (~7 min): any
-    request during the lock — correct token included — re-enters `AuthThrottleFail`
-    and pushes the lock out (so polling is impossible). The wait rides the last
-    extension's own `Retry-After` (the 8th response names the FailCount-8 lock in
-    full); only headers served *before* that extension understate the remaining
-    lockout (§5 429 record; observed ≈ 4 min on 3.8.3);
+  - auth-throttle contract pin (§5 — the constants the breaker is tuned against are
+    source-read; this case converts them into observed behavior): 6 bogus-token
+    requests arm the lock (the 6th still returns 401), the **7th** surfaces the
+    distinct 429 class with `Retry-After` (the class the breaker deliberately
+    excludes), a correctly-authenticated call during the lock receives the same 429
+    (shared per-IP lock, the §5 two-session 3+3 case exercised for real), a kb tool
+    call inside the cooldown window gets the local `{status: refused}` with **zero
+    kernel requests issued**, and after waiting out the lock the next call succeeds
+    with no recovery step (§5 self-healing expiry). **Runs after all other
+    kernel-dependent cases** (Execution order above — the per-IP lock 429s every
+    other kernel call while active). **Cost: expect ~4 minutes, not the first lock's
+    60 s** — any request during the lock, correct token included, extends it, so the
+    in-test wait is bounded by the last extension's own `Retry-After` and polling is
+    impossible. Implemented and passing on live 3.8.3 in
+    `~/siyuan-kernel-api/integration.si.test.ts` (opt-in `SIYUAN_INTEGRATION_THROTTLE=1`);
   - query read-only end to end: a raw `DELETE` via `/api/query/sql` without `mode`
     mutates siyuan.db, while the same statement through the tool is parser-rejected and
     every tool-issued statement carries `mode: "readonly"` (defense-in-depth pin). This
@@ -1881,13 +1862,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - search request shape: `paths`-derived scoping genuinely narrows results (guards the
     silently-ignored-field degradation, §3). **Runs first** (Execution order above) —
     the failure mode it guards is silent (whole-workspace results, not an error).
-    A no-code precursor works before any
-    implementation exists: two `curl` calls against the live kernel with the real API token
-    (the dev VM holds the token — run from the VM, like the rest of the profile), one
-    correctly-shaped `paths` call expected to return only fixture-box rows, one
-    deliberately wrong `boxes` call expected to degrade to whole-workspace results —
-    observing the degradation converts the §3 assumption into evidence before M3 builds on
-    it;
+    Implemented and passing in the client's integration profile, including the
+    wrong-`boxes` degradation observation that converted the §3 assumption into
+    evidence before M3 builds on it;
   - an OR-precedence aggregate (`SELECT box, COUNT(*) … WHERE a OR b`) with
     `kb: [fixture-a, fixture-b]` equals the sum of the two fixtures' seeded counts — the
     parenthesized-injection pin (deterministic because the fixture policy supplies exactly
@@ -1926,9 +1903,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 | # | Milestone | Gate |
 | --- | --- | --- |
-| 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity + full auth matrix verified from the VM against `http://192.168.100.1:6806`; pinned kernel version **3.8.3** (deliberate upgrade, verified by the M2 integration profile per the §10 upgrade checklist). See §8 for the deployment posture and the `ACCESS_AUTH_CODE_BYPASS` warning. |
-| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green; extension loads in a real pi session; offline §5 settings validator enforces the full rejection matrix. No build step in either repo — both ship raw `.ts` (`exports` → `index.ts`). |
-| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api`: typed methods for every documented endpoint the tool set uses plus the two named exceptions, per-call `retryable` flag (single retry, reads only), 30 s timeout, status-first error mapping (`SiYuanApiError`/`SiYuanAuthError`/`SiYuanRateLimitError`/`SiYuanTimeoutError`/`SiYuanNetworkError`), zero runtime deps. Unit suite green; integration profile passed against live 3.8.3 (auth smoke matrix, search `paths`-shape pin, verified-create kernel-contract pin with the `data[0].doOperations[0]` transaction shape, auth-throttle contract pin). Published to npm as 0.1.0; `pi-kb` already depends on the exact published version (`file:` switch done, installed copy verified identical to the repo). |
+| 0 | VM→host connectivity + auth smoke test | ✅ **Done.** Full auth matrix verified from the VM against `http://192.168.100.1:6806`; pinned kernel version **3.8.3**. See §8 for the deployment posture and the `ACCESS_AUTH_CODE_BYPASS` warning. |
+| 1 | Repo scaffolds — two separate repositories | ✅ **Done.** Both repos green; extension loads in a real pi session; offline §5 settings validator enforces the full rejection matrix. No build step in either repo — both ship raw `.ts` (`exports` → `index.ts`). |
+| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api` (endpoint surface, error classes, retry/timeout policy, and design constraints are that repo's record — README + AGENTS.md); unit suite green; integration profile passed against live 3.8.3 (auth smoke matrix, search `paths`-shape pin, verified-create kernel-contract pin, auth-throttle contract pin). Published to npm as 0.1.0; `pi-kb` depends on the exact published version. |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
