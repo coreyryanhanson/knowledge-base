@@ -139,16 +139,13 @@ Curated pi tools (one set, not per-KB):
   already has. Search
   is the discovery step: a hit is directly consumable as `read { kb, docId: root_id }`
   with no intermediate box→name resolution hop, so the `search → read` recall loop (§4)
-  never dead-ends on attribution. (Kernel shape verified at 3.8.2: the route returns
-  `[]*Block` whose JSON carries `box`, `rootID`, `hPath`, `id`, `updated` per hit —
-  `model/block.go:43-74`; the FTS projections select `created, updated` verbatim,
-  `model/search.go:2479`, and `fromSQLBlock` copies `Updated` through untruncated —
-  unlike `content`, capped at 5120, and `hpath`, snippet-cut at 512 bytes, which is one
-  more reason hpath is display-only in this doctrine — `model/search.go:3094`. The
-  multi-word doc-mode path rides `SELECT blocks.*`, full row included —
-  `model/search.go:2764-2800`.) `updated` is the **matched block's** update time, not the
-  doc's: doc-level recency for reconciliation reads the root row (`id = root_id`) or a
-  `read`, never whichever block happened to match.
+  never dead-ends on attribution. (Row shape: each hit's JSON carries `box`, `rootID`,
+  `hPath`, `id`, `updated`; `updated` arrives untruncated while `hpath` is snippet-cut at
+  512 bytes — one more reason hpath is display-only in this doctrine. Pinned against the
+  live kernel by the §10 recall-loop echo assertion — the row JSON, not a kernel struct,
+  is the contract the extension consumes.) `updated` is the **matched block's** update
+  time, not the doc's: doc-level recency for reconciliation reads the root row
+  (`id = root_id`) or a `read`, never whichever block happened to match.
 3. **read** — fetch a doc as GFM markdown via `exportMdContent`. `getDoc` (DOM output) is
    never used — the block-ID outline and spill design presuppose GFM. **Addressing
    (decision record, R2; full record §4): `read` takes `kb` (one name) + `docId`** — an
@@ -918,18 +915,14 @@ every follow-up read/write/move; title and hpath are display only, not an addres
   deliberately not built).
 - **`newBlockId`** — the inserted block's ID (insert/append/replace-section modes); it is
   the ready target for a follow-up `edit` without a `query` round-trip. **Response shape
-  (source-read at 3.8.2, pinned live by §10)**: the insert/append/prepend handlers return
-  `ret.Data = transactions` — a `[]*Transaction` envelope, not a block ID (`api/block_op.go`);
-  the minted ID is assigned during `PerformTransactions` (`insertedNode.ID = ast.NewNodeID()`,
-  `model/transaction.go`) and written back onto the returned operation
-  (`operation.ID = insertedNode.ID`), which serializes as `id` on the operation object —
-  so `newBlockId` is read from the first insert operation's `id` field
-  (`data[0].doOperations[0].id`), never from a top-level return field that does not exist.
+  (pinned live by the M2 integration profile)**: the insert/append handlers return the
+  transaction array, not a block ID, and the minted ID serializes as the `id` of the
+  first insert operation — `newBlockId` is read from `data[0].doOperations[0].id`,
+  never from a top-level return field that does not exist.
   **Multi-block markdown (decision record)**: a body that parses to
   N blocks mints N block IDs, and the kernel returns one representative ID whose choice
-  the tool does not assume — the extraction path above is pinned by the §10 multi-block
-  case, which asserts the live response shape instead of trusting this source-read (the
-  same move as the search-shape pin). For a
+  the tool does not assume — the §10 multi-block case re-asserts the live response shape
+  and the walk-set diff on every integration run. For a
   multi-block body `newBlockId` therefore addresses *one block of the appended content*,
   never "the whole thing I sent" — an agent that needs a different fragment of its own
   body re-locates it via the outline/`query` (echoed IDs, R1), the same route as editing
@@ -1782,7 +1775,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     §3 echo contract): a two-fixture search hit's row carries `root_id`, `box`, the
     per-row resolved KB name, and a non-empty `updated` matching `\d{14}` — the row
     JSON, not the Go struct, is the contract the extension consumes, so the §3
-    source-read is pinned against the live kernel like every other shape claim — and
+    row-shape claim is pinned against the live kernel like every other shape claim — and
     `read { kb, docId: root_id }` on that hit succeeds —
     the `search → read` loop the recall harness rides is mechanically valid, not assumed;
   - **two-KB search saturation pin** (§3 per-KB fan-out): with both fixtures active, plant a
