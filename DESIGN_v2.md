@@ -102,19 +102,15 @@ repos green, `file:` dependency working):
   only the doc `id`** — `exportMdContent` (`kernel/api/export.go`) has no size field
   and returns whole docs; there is no kernel-side or client-side read limit, so the
   read budget (inline preview + spill) is entirely extension-owned (§3).
-- **429 is its own error class**: `authByAPIToken` rate-locks IPs after repeated bad-token
-  attempts (kernel/model/session.go:404, `Retry-After`; GHSA-m6w6-p7pc-fpg2 — the
-  throttle constants and sweep live in kernel/util/session.go, cited in-source as
-  GHSA-2x7j-p79w-7744; both advisories cover this throttle). The client maps
-  HTTP 429 distinctly from generic auth failure: a 429 can arrive with a **correct**
-  token — the lock is per-IP, shared across clients and with the access-auth-code path,
-  and one VM is one client IP (§5 has the full record, incl. the two-session 3+3 case)
-  — so the envelope never says "correct the token" and the client **never retries
-  401/403/429** responses; a retry loop with a bad token would lock the VM out of
-  the kernel entirely. (And the client-side rule alone is not enough: the agent's own
-  tool-call retries are the real retry loop — extension-side circuit breaker, §5.)
-  The throttle's runtime contract is pinned by integration test, not assumed (§10
-  throttle case).
+- **429 is its own error class** (`SiYuanRateLimitError`): the kernel rate-locks IPs
+  after repeated bad-token attempts, so a 429 can arrive with a **correct** token —
+  the envelope never says "correct the token", and the client **never retries
+  401/403/429** responses (a retry loop with a bad token would lock the VM out of
+  the kernel entirely; the client-side rule alone is not enough — the agent's own
+  tool-call retries are the real retry loop, hence the extension-side circuit
+  breaker, §5, which has the full throttle record). The throttle's runtime contract
+  is pinned by integration test, not assumed (§10 throttle case; passed against live
+  3.8.3 in the M2 profile).
   Transient 5xx/timeouts on idempotent reads get a single retry; writes are never
   retried. **Every client call carries a hard timeout** (30 s, one constant — native
   `fetch` waits forever by default, and a hung kernel would hang the agent's turn): a
