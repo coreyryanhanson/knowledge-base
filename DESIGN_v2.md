@@ -333,18 +333,16 @@ default and the per-KB search `pageSize`) and one helper.
   the evidence for the §4 stale-target verification. The
   root block ID is the echoed `docId` itself (a SiYuan doc's root block ID *is* its doc
   ID, and `read`'s ownership query — above — already proved the row exists), so the
-  outline fetch needs no second doc query. **Decision record (superseded
-  SQL outline)**: the original pin (`SELECT id, content, hpath FROM blocks WHERE
-  root_id = ? AND type = 'h' ORDER BY sort`) misread two `blocks` column semantics,
-  verified at 3.8.2: `sort` is a block-type weight (`database.go:1772`, every heading =
-  5), not document order; and the hash-diff index upsert (`sql/upsert.go:445`) re-inserts
-  edited blocks at the table's end, so rowid tie-break order is document order only for
-  freshly-indexed docs — the outline returned headings out of order exactly after the
-  §4 preferred write modes (`edit`/`replace-section`), silently misplacing the next
-  tool-derived anchor. (`hpath` is likewise doc-level on every block row,
-  `database.go:1009`, not heading depth — §4's `type = 'd'` filter already encodes that
-  truth.) `getChildBlocks` has none of these failure modes and is a documented endpoint —
-  no new §2 exception.
+  outline fetch needs no second doc query. **Superseded SQL outline (conclusion
+  pinned; details live in the §10 outline-ordering case)**: an earlier pin enumerated
+  headings via SQL (`… WHERE root_id = ? AND type = 'h' ORDER BY sort`) — it misreads
+  `blocks` column semantics (`sort` is a block-type weight, not document order) and the
+  hash-diff index upsert re-inserts edited blocks at the table's end, so rowid order is
+  document order only for freshly-indexed docs; the outline returned headings out of
+  order exactly after the §4 preferred write modes (`edit`/`replace-section`). SQL
+  enumeration of live-doc structure is therefore rejected everywhere in this design (§4
+  cites this record for the delete-set walk). `getChildBlocks` has none of these
+  failure modes and is a documented endpoint — no new §2 exception.
   Freshness: the outline is rebuilt on every `read` call from the live block tree — and
   on every doc-targeting write (§4 write-result contract): the write result itself
   carries the fresh outline, so a post-write `read` is never needed just to regain
