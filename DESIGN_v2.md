@@ -4,13 +4,15 @@ A pi extension that builds and maintains a knowledge base in SiYuan, modeled on 
 methods but re-grounded: **pi as the harness, SiYuan as the storage engine, zero model/provider
 opinions.**
 
-Status: design complete — Milestones 0 (connectivity/auth smoke test), 1 (repo scaffolds), and 2 (kernel client +
-integration profile) are done (§11); implementation continues at Milestone 3. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
+Status: design complete — Milestones 0–2 are done (§11); implementation continues at
+Milestone 3. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
 revisions agreed in design review (decision records R1–R6, Appendix).
 Provenance: decisions reached via a Socratic design interview plus adversarial review against
-GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan @ 3.8.2; the
+GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan; the
 discovery doctrine anchored against ~/gbrain skills/query + MEMORY_VERBS_v1); rationale
-recorded inline.
+recorded inline. Client-side behavior claims pinned by the M2 integration profile are
+recorded in the `siyuan-kernel-api` repo (client tests + integration.si.test.ts), not
+re-argued here.
 
 Contents: [1 Goals](#1-goals) · [2 Architecture](#2-architecture--two-packages) · [3 v1 scope & result budgets](#3-v1-scope--the-lean-agent-driven-loop) · [4 Write-back conventions](#4-write-back-conventions) · [5 Multi-KB config & scope state](#5-multi-kb-config--scope-state) · [6 Named ceilings](#6-named-ceilings-deliberate-simplifications) · [7 Access invariant](#7-access-invariant) · [8 Deployment topology](#8-deployment-topology) · [9 Risks](#9-risks) · [10 Testing posture](#10-testing-posture) · [11 Milestone rollout](#11-milestone-rollout) · [Appendix — decision ledger](#appendix--decision-ledger)
 
@@ -68,60 +70,39 @@ repos green, `file:` dependency working):
 - Pure SiYuan kernel HTTP API client + TypeScript types.
 - **Zero pi imports, zero runtime dependencies** (native `fetch`, hand-rolled types).
 - URL + token injected via config (never hardcoded — the deployment topology requires it).
-- Version fetch (`/api/system/version`); the pinned-version write gate lives in the
-  extension (decision record; ledger row "Version gate"). **Ownership (pinned)**: `siyuan-kernel-api`
-  exposes `getVersion()` — it fetches `/api/system/version` and returns the raw version
-  string; it holds no pinned constant and enforces nothing. The **extension** owns
-  `PINNED_SIYUAN_VERSION`, the strict-match policy, and the refusal message (§5); the
-  compose tag (§8) and the §10 setup assert reference the same version, not owners.
-  **Timing**: eager probe at
-  `session_start`, verdict cached for the session — no write executes before a probe
-  has succeeded, and probe failure (unreachable, error) also refuses writes
-  (fail-closed: "never probed successfully" means no writes). Reads are never
-  version-gated — the gate exists for the write blast radius only; the unreachable-kernel
-  per-call degradation §5 pins is a separate mechanism, not a second gate. The probe is
-  a **correctness gate, not a security gate**: `/api/system/version` is unauthenticated
-  (connectivity and version only); write auth enforcement lives kernel-side.
-  **Mismatch behavior**: refuse writes on any drift from the pinned full version; reads
-  warn and proceed. **Strict, not major-only** (revised after external review): every
-  behavior-drift case this design records landed in a *minor* release (duplicate-minting
-  create in v3.7.0), so a major-only gate would never fire on the drift class it exists
-  for — and §8's pinned compose tag makes upgrades deliberate, so strict matching fires
-  exactly when the §10 upgrade checklist should run. No *automatic* staleness re-probe
-  exists (a mid-session version swap is out of threat model); the §5 recovery hook's
-  per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict — it is not
-  staleness polling. The first-write probe retry when no probe has yet succeeded is
-  specified with the unreachable-startup flow (§5).
-- The search method takes an explicit `pageSize` parameter (the kernel's real
-  field); the query method takes `stmt`
-  plus the read-only `mode` flag (§2's second named exception, below) and **no** limit
-  parameter — a client-side query limit could only exist as SQL-text injection, which is
-  the extension's job (§3). The kernel API is called exactly as the caller specifies;
-  result-budget policy belongs to the extension (§3), not the client; client-side limits
-  apply only where the kernel API has a real field (search `pageSize`). The **read method takes
-  only the doc `id`** — `exportMdContent` (`kernel/api/export.go`) has no size field
-  and returns whole docs; there is no kernel-side or client-side read limit, so the
-  read budget (inline preview + spill) is entirely extension-owned (§3).
-- **429 is its own error class** (`SiYuanRateLimitError`): the kernel rate-locks IPs
-  after repeated bad-token attempts, so a 429 can arrive with a **correct** token —
-  the envelope never says "correct the token", and the client **never retries
-  401/403/429** responses (a retry loop with a bad token would lock the VM out of
-  the kernel entirely; the client-side rule alone is not enough — the agent's own
-  tool-call retries are the real retry loop, hence the extension-side circuit
-  breaker, §5, which has the full throttle record). The throttle's runtime contract
-  is pinned by integration test, not assumed (§10 throttle case; passed against live
-  3.8.3 in the M2 profile).
-  Transient 5xx/timeouts on idempotent reads get a single retry; writes are never
-  retried. **Every client call carries a hard timeout** (30 s, one constant — native
-  `fetch` waits forever by default, and a hung kernel would hang the agent's turn): a
-  timeout is a transient failure and follows the same read-retry/write-never policy.
-- **Documented endpoints only, two named exceptions**: per API.md, undocumented kernel routes and `/api/transactions` carry no compatibility guarantees; the client never calls them — with two exceptions: **`/api/search/fullTextSearchBlock`**. The route is absent from API.md, but SiYuan's own MCP server exposes `search.fulltext` as a supported agent-facing tool whose handler calls the identical kernel function (`model.FullTextSearchBlock`) — the underlying behavior carries an upstream support commitment even though the HTTP route is not documented. The exception is named, pinned in §3 (search transport), and pinned by integration test (§10); if it ever breaks, the fallback is SQL `content LIKE` over the documented `/api/query/sql`.
-  The second exception is a parameter, not a route: **`/api/query/sql` with `mode: "readonly"`**
-  (`api/sql.go`, absent from API.md) — the `mode` flag invokes the kernel's
-  `CheckReadonlyStatement`, a real `sqlite3_stmt_readonly` check (SELECT/WITH only). The
-  query tool always sends it: kernel-enforced read-only is defense in depth behind the
-  extension's parser certification (§3), so a certification bug can never turn the query
-  tool into a writer. Pinned by integration test (§10).
+- **Version gate ownership (pinned)**: the client exposes `getVersion()` — fetches
+  `/api/system/version`, returns the raw string, holds no pinned constant and enforces
+  nothing. The **extension** owns `PINNED_SIYUAN_VERSION`, the strict-match policy, and
+  the refusal message (§5); the compose tag (§8) and the §10 setup assert reference the
+  same version, not owners. **Strict, not major-only**: every behavior-drift case this
+  design records landed in a *minor* release (duplicate-minting create in v3.7.0), so a
+  major-only gate would never fire on the drift class it exists for. **Mismatch
+  behavior**: refuse writes on any drift from the pinned full version; reads warn and
+  proceed. Gate timing and fail-closed rules are pinned in §5 (validation order,
+  unreachable-kernel record); the gate is a correctness gate, not a security gate —
+  `/api/system/version` is unauthenticated.
+- **Client surface is policy-free** (implemented and pinned in the
+  `siyuan-kernel-api` repo — see its AGENTS.md "Design constraints"): query takes
+  `stmt` + the readonly `mode` flag and **no** limit parameter; search takes an
+  explicit `pageSize` (the kernel's real field); read takes only the doc `id` — so
+  result budgets (§3) are entirely extension-owned. Every endpoint method exists in
+  `client.ts` with its request shape pinned by unit and integration tests (§10 M2
+  profile, passed against live 3.8.3).
+- **Transport contract (implemented in the client)**: `SiYuanRateLimitError` (429) is
+  a *sibling* of `SiYuanAuthError` — the kernel rate-locks IPs, so a 429 can arrive
+  with a correct token; the client never retries 401/403/429, gets a single retry on
+  reads only (network/timeout/5xx), never retries writes, and every call carries a
+  hard 30 s timeout. The throttle's runtime contract is pinned by integration test
+  (§10). The client-side rule alone is not enough — the agent's own tool-call retries
+  are the real retry loop, hence the extension-side circuit breaker (§5).
+- **Documented endpoints only, two named exceptions** (both pinned by integration
+  tests, §10): **`/api/search/fullTextSearchBlock`** — absent from API.md, but SiYuan's
+  own MCP server exposes it as a supported agent-facing tool backed by the identical
+  kernel function (`model.FullTextSearchBlock`); if it ever breaks, the fallback is
+  SQL `content LIKE` over the documented `/api/query/sql`. Second exception is a
+  parameter, not a route: **`/api/query/sql` with `mode: "readonly"`** (`api/sql.go`) —
+  a real `sqlite3_stmt_readonly` check, kernel-enforced defense in depth behind the
+  extension's parser certification (§3).
 - Any extension can consume it; only this project's KB extension registers pi tools.
 
 ### `pi-kb` extension (the pi extension)
@@ -338,10 +319,8 @@ default and the per-KB search `pageSize`) and one helper.
   carries the fresh outline, so a post-write `read` is never needed just to regain
   valid targets and anchors.
 - Where the policy lives: the inline limit and spill mechanism are extension-owned (one
-  shared helper, the four constants above); `siyuan-kernel-api` stays policy-free — its query method takes
-  `stmt` + `mode`, its search method takes an explicit `pageSize` parameter (the
-  kernel's real field name; §2's search pin), and its read
-  method takes only the doc `id` (§3 owns the entire read budget via preview + spill).
+  shared helper, the four constants above); `siyuan-kernel-api` stays policy-free (§2),
+  so §3 owns the entire read budget via preview + spill.
 
 No index, no embeddings, no graph, no background cycles. The agent performs synthesis
 in-session; model-neutrality holds by construction.
