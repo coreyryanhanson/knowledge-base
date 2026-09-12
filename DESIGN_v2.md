@@ -241,9 +241,8 @@ default and the per-KB search `pageSize`) and one helper.
   layer 1 certifies; dependency upgrades are deliberate acts gated by the §10 upgrade
   checklist, never drift. The kernel itself uses
   vitess `sqlparser` for its own LIMIT clamp, so parser-not-regex is
-  upstream-precedented; a hand-rolled scanner's failure mode is silently wrong results,
-  and one review pass already found three holes in it (OR precedence, aggregate
-  post-filter interaction, unrestricted FROM). Three layers, worst case at each rung is
+  upstream-precedented; a hand-rolled scanner's failure mode is silently wrong results.
+  Three layers, worst case at each rung is
   a rejection, never a silently mis-scoped query:
   1. **Parser-certified injection** — the statement must parse as exactly one top-level
      `SELECT` (this is the DML gate: `UPDATE`/`DELETE`/`INSERT` are rejected here and are
@@ -259,8 +258,7 @@ default and the per-KB search `pageSize`) and one helper.
      one; and a CTE shadowing an allowlisted table name (`WITH blocks AS (SELECT 1 AS
      box) …`) would fabricate in-scope rows past both the FROM check and the layer-3
      backstop; v1 has no CTE use case), no compound `UNION`, no bare
-     `HAVING` (v1 policy, unchanged from the scan-era rejection list — now structurally
-     checkable instead of heuristically guessed). Anything else is **rejected with the
+     `HAVING` (v1 policy). Anything else is **rejected with the
      reason named**, never guessed at. If certified, the extension **rebuilds the
      statement from the AST**: splice `box IN (...)` into the AST's top-level WHERE
      (`(existing) AND box IN (...)`), inject LIMIT if absent, serialize with the parser's own
@@ -268,17 +266,13 @@ default and the per-KB search `pageSize`) and one helper.
      single certified SELECT whose WHERE is the original expression ANDed with the
      injected predicate — the executed statement is the re-parsed one. (Mechanism pinned
      by an executed parser spike on node-sql-parser@5.4.0, SQLite dialect — findings
-     recorded in §10: the library emits **no AST locations on any dialect**, so the
-     originally planned coords-based text splice has no coordinates to read; the spike
-     verified the serializer round-trip is **stable on the certified grammar subset**
-     (adversarial literals included: escaped quotes, `LIKE` backslash escapes, clause
-     keywords inside strings, comment-lookalikes, non-ASCII — 8/8 re-parse to an
-     identical AST; reformatting is cosmetic backtick-quoting); **multi-statement input
-     does not throw** — `astify` returns an array, so the cert rejects `Array.isArray(ast)`;
-     and **UNION parses as `type: 'select'`** with the second arm in `_next`/`set_op`, so
-     the cert rejects on those fields, not the type string — the kernel *does* execute
-     UNIONs, and a first-arm-only injection would leave the second arm unscoped, whose
-     box-less aggregate rows would then pass the backstop exemption.) Bare concatenation
+     recorded in §10: the library emits **no AST locations on any dialect** (hence AST
+     rebuild + re-parse verify, not a coords-based text splice); the serializer
+     round-trip is **stable on the certified grammar subset** (adversarial literals —
+     enumerated in §10); **multi-statement input does not throw** — `astify` returns an
+     array, so the cert rejects `Array.isArray(ast)`; and **UNION parses as
+     `type: 'select'`** with the second arm in `_next`/`set_op`, so the cert rejects on
+     those fields, not the type string.) Bare concatenation
      would turn `WHERE a OR b` into `a OR (b AND box IN ...)`: row queries get rescued by
      the backstop, but aggregates compute over the whole workspace — the exact corruption
      injection exists to prevent. (No WHERE at all → the AST gets a fresh
