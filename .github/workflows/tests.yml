@@ -1,12 +1,10 @@
-# Disabled: CI would fail until pi-kb's "file:../siyuan-kernel-api" dependency is
-# replaced by a registry version. Point the branches below at main once published.
 name: Tests
 
 on:
   push:
-    branches: [__disabled-until-published__]
+    branches: [main]
   pull_request:
-    branches: [__disabled-until-published__]
+    branches: [main]
 
 permissions:
   contents: read
