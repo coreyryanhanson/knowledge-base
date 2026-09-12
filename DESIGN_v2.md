@@ -4,8 +4,8 @@ A pi extension that builds and maintains a knowledge base in SiYuan, modeled on 
 methods but re-grounded: **pi as the harness, SiYuan as the storage engine, zero model/provider
 opinions.**
 
-Status: design complete — Milestone 0 (connectivity/auth smoke test, §11) is done, implementation
-starts at Milestone 1. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
+Status: design complete — Milestones 0 (connectivity/auth smoke test) and 1 (repo scaffolds) are done
+(§11), implementation starts at Milestone 2. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
 revisions agreed in design review (decision records R1–R6, Appendix).
 Provenance: decisions reached via a Socratic design interview plus adversarial review against
 GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan @ 3.8.2; the
@@ -22,11 +22,8 @@ Contents: [1 Goals](#1-goals) · [2 Architecture](#2-architecture--two-packages)
   recalls it in later sessions — the "tell it to remember X, restart, ask for X back" test.
 - **General and robust from day 1**: clean package boundaries, typed client, version-checked
   API. Two **separate repositories** (decision below): `siyuan-kernel-api` is published as an
-  independent npm package (semver, consumed by `pi-kb` via an exact version pin — and via
-  symlink / `file:` during local development before/alongside publishing), `pi-kb` stays
-  local-only. `pi-kb` pins an exact `siyuan-kernel-api` version (never `^`) — same discipline
-  as the `node-sql-parser@5.4.0` pin, so the pre-publish `file:` phase behaves identically to
-  the published future.
+  independent npm package, `pi-kb` stays local-only and consumes it via `file:` until the
+  npm version is published.
 - **Model-neutral**: the extension makes **zero** model/provider calls. The agent is the
   intelligence; SiYuan is the memory.
 - **Minimal context surface**: a small, curated tool set. No MCP tool wall, no per-KB tool
@@ -50,8 +47,8 @@ Contents: [1 Goals](#1-goals) · [2 Architecture](#2-architecture--two-packages)
 
 Two packages, two **repositories** (decision ledger row "Repo layout"): `siyuan-kernel-api`
 is published to npm as an independent package and lives in its own repo; `pi-kb` stays
-local-only and consumes it via an exact version pin (`file:`/symlink locally during
-development). The §2 package rules below are unchanged by the split — the boundary lives
+local-only and consumes it via `file:` until the npm version is published. The §2 package
+rules below are unchanged by the split — the boundary lives
 in the import graph, the git plumbing just follows it. Following the validated
 `pi-tbox` → `pi-tool-masking` precedent, plus publishing the client:
 
@@ -257,8 +254,9 @@ default and the per-KB search `pageSize`) and one helper.
 - **query scoping (decision record)** — `kb` (array, §5) resolves to notebook IDs; the
   extension owns the `box IN (...)` predicate, the agent never writes `box` or knows IDs.
   Certification is **parser-based, not token-scanned**: `pi-kb` uses **`node-sql-parser`**
-  (SQLite dialect) — the extension's one runtime dependency (`siyuan-kernel-api` stays
-  zero-dep; scoping is policy, and §3 policy is extension-owned) — **pinned to the exact
+  (SQLite dialect) — the extension's one runtime dependency of its own (the client is the
+  other dependency, and `siyuan-kernel-api` itself stays zero-dep; scoping is policy, and
+  §3 policy is extension-owned) — **pinned to the exact
   spike-verified version (`node-sql-parser@5.4.0`)**, same discipline as the §8 kernel
   pin: layer 1's AST certification and CTE rejection rest entirely on this library's
   parse/serialize behavior, so a transitive or careless bump could silently change what
@@ -1076,7 +1074,7 @@ duplicate doc, never a silent clobber.
   ```
 
   `name` is the human-facing primary key (the `kb` tool param and `/kb` operate on names);
-  names must be single tokens — no whitespace or `/` (shape validation rejects them, the
+  names must be non-empty single tokens — no whitespace or `/` (shape validation rejects them, the
   `/kb <name> on|off` grammar is unparseable otherwise, §5 validation step 1);
   `writeConfirmTimeout` (seconds, default 60) is the write-confirmation dialog timeout —
   `0` waits indefinitely (§5 write-confirmation record);
@@ -1540,8 +1538,8 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 ## 10. Testing posture
 
 - **Stack**: TypeScript + vitest (pi-tbox precedent); `node-sql-parser@5.4.0` (SQLite
-  dialect, exact-pinned — §3 query scoping) in `pi-kb` is the one runtime dependency —
-  `siyuan-kernel-api` stays zero-dep.
+  dialect, exact-pinned — §3 query scoping) in `pi-kb` is the one runtime dependency of
+  its own besides the client — `siyuan-kernel-api` stays zero-dep.
 - **Unit**: `siyuan-kernel-api` client tested with mocked `fetch` — request shapes, auth header,
   error mapping, version fetch (the core holds no gate — §2 ownership).
 - **Unit (extension layer)**: the risky logic lives in the extension, not the client, so the
@@ -1982,7 +1980,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | # | Milestone | Gate |
 | --- | --- | --- |
 | 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
-| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo, decision record below): library package skeleton + settings schema on the extension side | `vitest` runs green on trivial test (both repos) |
+| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo, decision record below): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green (`vitest run` + `tsc --noEmit`); extension loads in a real pi session, zero tools; offline §5 settings validator enforces the full rejection matrix. **No build step (B4):** the library ships raw `.ts` (`exports` points at `src/index.ts`) — pi loads TypeScript directly and a `dist/` hop would only force a rebuild per edit. `npm publish` ships `src/` verbatim, and `pi-kb` switches its dependency from `file:` to the published version when it lands; no build step exists in either repo. |
 | 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists, its *tool-path* case landing with the extension at M3; the auth-throttle contract pin and the search `paths`-shape pin included — execution order and the host-side `curl` precursor per §10) |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
@@ -1993,7 +1991,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 | Decision | Choice | Rejected alternative | Where |
 | --- | --- | --- | --- |
-| Repo layout | Two **separate repositories** — `siyuan-kernel-api` (published to npm, semver, its own repo/versioning; reusable by non-pi consumers) and `pi-kb` (local-only) — with `pi-kb` pinning the client at an exact version (`file:`/symlink during local dev) | Monorepo — fine while the client was local-only, but publishing + a no-merge-back decision tips it; repos are easy to split, annoying to merge, and the contract pins (§10) test the installed client, i.e. the published surface | §1, §10 |
+| Repo layout | Two **separate repositories** — `siyuan-kernel-api` (published to npm, semver, its own repo/versioning; reusable by non-pi consumers) and `pi-kb` (local-only) — with `pi-kb` consuming the client locally via `file:` until publishing | Monorepo — fine while the client was local-only, but publishing + a no-merge-back decision tips it; repos are easy to split, annoying to merge, and the contract pins (§10) test the installed client, i.e. the published surface | §1, §10 |
 | Core package shape | Library-only, zero pi imports | Core as second pi plugin | §2 |
 | Transport | Kernel HTTP API | MCP bridge | §2 |
 | v1 scope | Lean agent-driven loop | RAG/graph/dream-cycle in v1 | §1, §6 |
