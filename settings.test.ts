@@ -62,8 +62,14 @@ describe("validatePiKbSettings", () => {
 		[{ apiToken: "" }, "apiToken is required and must be a non-empty string"],
 		[{ kbs: "dev" }, "kbs is required and must be an array"],
 		[{ defaultKBs: "dev" }, "defaultKBs must be an array of KB name strings"],
-		[{ defaultKBs: ["a", 1] }, "defaultKBs must be an array of KB name strings"],
-		[{ allowUnattendedWrites: "yes" }, "allowUnattendedWrites must be a boolean"],
+		[
+			{ defaultKBs: ["a", 1] },
+			"defaultKBs must be an array of KB name strings",
+		],
+		[
+			{ allowUnattendedWrites: "yes" },
+			"allowUnattendedWrites must be a boolean",
+		],
 		[
 			{ writeConfirmTimeout: -1 },
 			"writeConfirmTimeout must be a non-negative number (seconds, 0 = wait indefinitely)",
@@ -73,9 +79,9 @@ describe("validatePiKbSettings", () => {
 			"writeConfirmTimeout must be a non-negative number (seconds, 0 = wait indefinitely)",
 		],
 	])("rejects bad type: %j", (overrides, expected) => {
-		expect(expectErrors(validatePiKbSettings(validConfig(overrides)))).toContain(
-			expected,
-		);
+		expect(
+			expectErrors(validatePiKbSettings(validConfig(overrides))),
+		).toContain(expected);
 	});
 
 	it.each([
@@ -144,7 +150,9 @@ describe("validatePiKbSettings", () => {
 
 	it("rejects a defaultKBs entry naming an unknown KB", () => {
 		expect(
-			expectErrors(validatePiKbSettings(validConfig({ defaultKBs: ["missing"] }))),
+			expectErrors(
+				validatePiKbSettings(validConfig({ defaultKBs: ["missing"] })),
+			),
 		).toContain("defaultKBs entry 'missing' does not match any configured KB");
 	});
 

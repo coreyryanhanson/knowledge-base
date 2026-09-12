@@ -147,3 +147,4 @@ vite.config.ts.timestamp-*
 
 # Temporarily disable package lock until plugin matures
 package-lock.json
+/.husky/_

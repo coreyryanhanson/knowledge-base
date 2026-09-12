@@ -1,0 +1,19 @@
+{
+	"$schema": "./node_modules/oxfmt/configuration_schema.json",
+	"useTabs": true,
+	"tabWidth": 2,
+	"printWidth": 80,
+	"sortPackageJson": false,
+	"ignorePatterns": [
+		"**/*.json",
+		"**/*.jsonc",
+		"**/*.json5",
+		"**/*.md",
+		"**/*.mdx",
+		"**/*.yaml",
+		"**/*.yml",
+		"**/*.toml",
+		"**/*.css",
+		"**/*.html"
+	]
+}

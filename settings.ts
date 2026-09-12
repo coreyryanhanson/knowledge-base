@@ -31,7 +31,9 @@ function isNonEmptyString(value: unknown): value is string {
 	// value always matches what was validated (baseUrl/token/notebook are used
 	// verbatim downstream).
 	return (
-		typeof value === "string" && value.trim().length > 0 && value === value.trim()
+		typeof value === "string" &&
+		value.trim().length > 0 &&
+		value === value.trim()
 	);
 }
 
@@ -46,7 +48,10 @@ function checkName(name: string, errors: string[]): void {
 
 export function validatePiKbSettings(raw: unknown): ValidationResult {
 	if (!isRecord(raw) || !isRecord(raw["pi-kb"])) {
-		return { ok: false, errors: ["settings.json must contain a 'pi-kb' object"] };
+		return {
+			ok: false,
+			errors: ["settings.json must contain a 'pi-kb' object"],
+		};
 	}
 	const config = raw["pi-kb"];
 	const errors: string[] = [];
@@ -93,7 +98,9 @@ export function validatePiKbSettings(raw: unknown): ValidationResult {
 			defaultKBs = config.defaultKBs;
 			for (const name of defaultKBs) {
 				if (!names.has(name)) {
-					errors.push(`defaultKBs entry '${name}' does not match any configured KB`);
+					errors.push(
+						`defaultKBs entry '${name}' does not match any configured KB`,
+					);
 				}
 			}
 		}
@@ -126,7 +133,9 @@ export function validatePiKbSettings(raw: unknown): ValidationResult {
 			apiToken: config.apiToken as string,
 			kbs: config.kbs as KbEntry[],
 			defaultKBs,
-			allowUnattendedWrites: config.allowUnattendedWrites as boolean | undefined,
+			allowUnattendedWrites: config.allowUnattendedWrites as
+				| boolean
+				| undefined,
 			writeConfirmTimeout: config.writeConfirmTimeout as number | undefined,
 		},
 	};
