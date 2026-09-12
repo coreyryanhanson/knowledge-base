@@ -4,8 +4,8 @@ A pi extension that builds and maintains a knowledge base in SiYuan, modeled on 
 methods but re-grounded: **pi as the harness, SiYuan as the storage engine, zero model/provider
 opinions.**
 
-Status: design complete — Milestones 0 (connectivity/auth smoke test) and 1 (repo scaffolds) are done
-(§11), implementation starts at Milestone 2. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
+Status: design complete — Milestones 0 (connectivity/auth smoke test), 1 (repo scaffolds), and 2 (kernel client +
+integration profile) are done (§11); implementation continues at Milestone 3. This document is the successor to DESIGN.md and fully supersedes it; it folds in the addressing, discovery, and title-policy
 revisions agreed in design review (decision records R1–R6, Appendix).
 Provenance: decisions reached via a Socratic design interview plus adversarial review against
 GBrain and SiYuan primary sources (kernel claims verified against ~/siyuan @ 3.8.2; the
@@ -92,7 +92,8 @@ repos green, `file:` dependency working):
   per-`/kb` re-probe is user-invoked and incidentally refreshes the verdict — it is not
   staleness polling. The first-write probe retry when no probe has yet succeeded is
   specified with the unreachable-startup flow (§5).
-- The search method takes an explicit `limit` parameter; the query method takes `stmt`
+- The search method takes an explicit `pageSize` parameter (the kernel's real
+  field); the query method takes `stmt`
   plus the read-only `mode` flag (§2's second named exception, below) and **no** limit
   parameter — a client-side query limit could only exist as SQL-text injection, which is
   the extension's job (§3). The kernel API is called exactly as the caller specifies;
@@ -368,7 +369,8 @@ default and the per-KB search `pageSize`) and one helper.
   valid targets and anchors.
 - Where the policy lives: the inline limit and spill mechanism are extension-owned (one
   shared helper, the four constants above); `siyuan-kernel-api` stays policy-free — its query method takes
-  `stmt` + `mode`, its search method takes an explicit `limit` parameter, and its read
+  `stmt` + `mode`, its search method takes an explicit `pageSize` parameter (the
+  kernel's real field name; §2's search pin), and its read
   method takes only the doc `id` (§3 owns the entire read budget via preview + spill).
 
 No index, no embeddings, no graph, no background cycles. The agent performs synthesis
@@ -1660,7 +1662,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     byte-equals the submitted markdown, the message names the `markdownFile` retry path;
     a `markdownFile`-sourced create returns no `stagedPath` (nothing re-staged); a
     non-guard stop (successful mint) leaves no draft file.
-- **Integration (opt-in)**: profile against the real host SiYuan (reachable from the dev VM);
+- **Integration (opt-in)**: profile against the real host SiYuan at
+  `http://192.168.100.1:6806` (reachable from the dev VM; run manually from the VM —
+  the throttle pin locks the *calling* IP out for ~4 min, so CI never runs the profile:
+  it self-skips without env, decide per-run rather than wiring secrets into CI);
   skipped by default so CI never needs SiYuan. **Setup asserts the running kernel version exactly equals the pinned version** — an accidental upgrade produces a red suite instead of silently unverified drift; the upgrade checklist is the deliberate path. **Upgrade checklist (the enforcement procedure the §2 strict write gate backs — the gate fires, this checklist is how the re-pin gets earned; a guard no process runs is not a guard)**: on every
   SiYuan upgrade, run the full integration profile against the new kernel *before*
   updating the pinned version (the extension-owned `PINNED_SIYUAN_VERSION` constant, §2); a red suite means a behavior pin broke and
@@ -1878,7 +1883,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
   - version-refusal contract pin (§2/§5 — the write path's most load-bearing safety
     property, exercised against the real kernel): the mismatch is a relation between the
     kernel's reported version and the extension's pinned expectation, and the test owns
-    the pin — run the suite with the pin deliberately set to a version the real 3.8.2
+    the pin — run the suite with the pin deliberately set to a version the real 3.8.3
     kernel does not report (the same deliberate-misconfiguration move as the bogus-token
     cases: you don't make the kernel lie about auth to test rejection, you supply a wrong
     credential; here you supply a wrong expectation) → assert every write call returns
@@ -1888,9 +1893,13 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     global constant mutation.
   - auth-throttle contract pin (§5 — the constants the circuit breaker is tuned against
     are source-read; this case converts them into observed behavior, the same
-    assumption-into-evidence move as the search-shape pin below): fire 6 bogus-token
-    requests against the real kernel → assert the lockout surfaces as the distinct 429
-    class with `Retry-After` (the class the breaker deliberately excludes); interleave
+    assumption-into-evidence move as the search-shape pin below; observed live on
+    3.8.3 by the M2 integration profile, `~/siyuan-kernel-api/integration.si.test.ts`):
+    fire 6 bogus-token requests against the real kernel — the kernel arms the lock on
+    the 6th failure and that request still returns 401 (`FailCount <= 5` passes;
+    `AuthThrottleFail` locks at 6) → assert the lockout surfaces as the distinct 429
+    class with `Retry-After` on the **7th** bogus request (the class the breaker
+    deliberately excludes); interleave
     one correctly-authenticated request during the lockout and assert it receives the
     same 429 (the shared per-IP lock, the §5 two-session 3+3 case exercised for real);
     with the lock still active, make a further kb tool call and assert the cooldown
@@ -1898,14 +1907,20 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     (empty test-harness request log for the refusal — the structural guard is proven,
     not the message); then wait out the lock and assert the next
     correctly-authenticated call succeeds with no recovery step (the §5 self-healing
-    expiry; the wait is bounded by the *extended* lock, which the served `Retry-After`
-    understates — Cost below, §5 429 record). **Ordering: runs after all other kernel-dependent
+    expiry; the wait is bounded by the *extended* lock — the last-extension response's
+    own `Retry-After` names it, headers served before that extension understate —
+    Cost below, §5 429 record). **Ordering: runs after all other kernel-dependent
     cases** (Execution order above — the per-IP lock 429s every other kernel call from
     the VM while active).
-    **Cost: expect ~2 minutes, not the first lock's 60 s** — the in-test wait is bounded
-    by the *extended* lock, not the served `Retry-After`: the interleaved request
-    extends the lock, and its 429 header was computed before the extension, so the
-    header understates the new lockout (§5 429 record);
+    **Cost: expect ~4 minutes, not the first lock's 60 s** — locked requests
+    *overwrite* the lock, not add (`30 << (FailCount−5)`: 60 s at FailCount 6,
+    120 s at 7, 240 s at 8), so the in-test wait is bounded by the *last* extension,
+    not the sum of sequential locks (~7 min): any
+    request during the lock — correct token included — re-enters `AuthThrottleFail`
+    and pushes the lock out (so polling is impossible). The wait rides the last
+    extension's own `Retry-After` (the 8th response names the FailCount-8 lock in
+    full); only headers served *before* that extension understate the remaining
+    lockout (§5 429 record; observed ≈ 4 min on 3.8.3);
   - query read-only end to end: a raw `DELETE` via `/api/query/sql` without `mode`
     mutates siyuan.db, while the same statement through the tool is parser-rejected and
     every tool-issued statement carries `mode: "readonly"` (defense-in-depth pin). This
@@ -1931,7 +1946,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
     the failure mode it guards is silent (whole-workspace results, not an error).
     A no-code precursor works before any
     implementation exists: two `curl` calls against the live kernel with the real API token
-    (held on the host, not in the VM — run from the host or paste the token), one
+    (the dev VM holds the token — run from the VM, like the rest of the profile), one
     correctly-shaped `paths` call expected to return only fixture-box rows, one
     deliberately wrong `boxes` call expected to degrade to whole-workspace results —
     observing the degradation converts the §3 assumption into evidence before M3 builds on
@@ -1974,9 +1989,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 | # | Milestone | Gate |
 | --- | --- | --- |
-| 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.2**. |
-| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green (`vitest run` + `tsc --noEmit`); extension loads in a real pi session, zero tools; offline §5 settings validator enforces the full rejection matrix. **No build step (B4):** the library ships raw `.ts` (`exports` points at `src/index.ts`) — pi loads TypeScript directly and a `dist/` hop would only force a rebuild per edit. `npm publish` ships `src/` verbatim, and `pi-kb` switches its dependency from `file:` to the published version when it lands; no build step exists in either repo. |
-| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | Unit suite green; integration profile passes against real SiYuan (auth smoke matrix against a guarded endpoint included; the verified-create *kernel-contract pin* included — the single riskiest kernel contract, tested as soon as the client surface exists, its *tool-path* case landing with the extension at M3; the auth-throttle contract pin and the search `paths`-shape pin included — execution order and the host-side `curl` precursor per §10) |
+| 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.3** (re-pinned from 3.8.2 — deliberate upgrade: live `/api/system/version` probe now returns `{"code":0,"data":"3.8.3"}` and the `~/siyuan` checkout is at the v3.8.3 release commit; the M2 integration profile is the verification run required by the upgrade checklist and has passed against live 3.8.3 — a red behavior pin re-triggers the checklist). |
+| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green (`vitest run` + `tsc --noEmit`); extension loads in a real pi session, zero tools; offline §5 settings validator enforces the full rejection matrix. **No build step (B4):** the library ships raw `.ts` (`exports` points at `index.ts`) — pi loads TypeScript directly and a `dist/` hop would only force a rebuild per edit. `npm publish` ships the root `.ts` files verbatim (flat repo, no `src/`), and `pi-kb` switches its dependency from `file:` to the published version when it lands; no build step exists in either repo. |
+| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api` (`errors.ts`/`client.ts`/`types.ts` re-exported from `index.ts`; explicit per-module `files` list + `scripts/check-pack.mjs` in `prepublishOnly` and CI; no build step, M1 B4): typed methods for every documented endpoint the tool set uses plus the two named exceptions, required per-call `retryable` flag (single retry, reads only), 30 s per-attempt timeout, total status-first error mapping (`SiYuanApiError`/`SiYuanAuthError`/`SiYuanRateLimitError`/`SiYuanTimeoutError`/`SiYuanNetworkError` — base class never thrown), `getVersion()` with no gate or pinned constant. Unit suite (mocked `fetch`) green, `tsc --noEmit` clean, zero runtime deps / zero pi imports. Integration profile (`integration.si.test.ts`, self-skipping without env) passed against live 3.8.3 at `http://192.168.100.1:6806`, run manually from the dev VM: auth smoke matrix against a guarded endpoint, search `paths`-shape pin, verified-create *kernel-contract* pin (its *tool-path* case lands with the extension at M3) with a live `appendBlock` pinning the `data[0].doOperations[0]` transaction shape, and the auth-throttle contract pin (429 on the 7th bogus request; ≈ 4 min overwrite lock, waited out call-free). npm publish and the `pi-kb` `file:`→exact-version switch are M3 entry conditions, not done here. |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
