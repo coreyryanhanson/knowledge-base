@@ -1,6 +1,6 @@
 {
 	"name": "gnubrain",
-	"version": "0.0.0",
+	"version": "0.0.2",
 	"description": "GNUbrain's Not gBrain: open-source agent memory for pi with SiYuan as the storage engine.",
 	"keywords": [
 		"pi-package",
