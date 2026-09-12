@@ -1,0 +1,32 @@
+{
+	"name": "pi-kb",
+	"version": "0.1.0",
+	"description": "SiYuan knowledge-base extension for pi: agent-driven memory loop with SiYuan as the storage engine.",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"siyuan",
+		"knowledge-base"
+	],
+	"author": "Corey Ryan Hanson",
+	"license": "AGPL-3.0-or-later",
+	"type": "module",
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"scripts": {
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"siyuan-kernel-api": "file:../siyuan-kernel-api"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.85.1",
+		"@types/node": "^22.0.0",
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.0"
+	}
+}
