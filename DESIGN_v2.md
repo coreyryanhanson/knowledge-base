@@ -112,10 +112,6 @@ repos green, `file:` dependency working):
   write confirmation.
 - Reads multi-KB config from settings.json; validates `kb` params against it.
 
-Library-only and kernel-HTTP-over-MCP are settled decisions (Appendix ledger rows
-"Core package shape" and "Transport" — choice and rejected alternative each); no M3
-work depends on re-reading the argument.
-
 ---
 
 ## 3. v1 Scope — the lean agent-driven loop
@@ -1905,7 +1901,7 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | --- | --- | --- |
 | 0 | VM→host connectivity + auth smoke test | ✅ **Done.** Full auth matrix verified from the VM against `http://192.168.100.1:6806`; pinned kernel version **3.8.3**. See §8 for the deployment posture and the `ACCESS_AUTH_CODE_BYPASS` warning. |
 | 1 | Repo scaffolds — two separate repositories | ✅ **Done.** Both repos green; extension loads in a real pi session; offline §5 settings validator enforces the full rejection matrix. No build step in either repo — both ship raw `.ts` (`exports` → `index.ts`). |
-| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api` (endpoint surface, error classes, retry/timeout policy, and design constraints are that repo's record — README + AGENTS.md); unit suite green; integration profile passed against live 3.8.3 (auth smoke matrix, search `paths`-shape pin, verified-create kernel-contract pin, auth-throttle contract pin). Published to npm as 0.1.0; `pi-kb` depends on the exact published version. |
+| 2 | `siyuan-kernel-api` client | ✅ **Done.** Published to npm as 0.1.0; `pi-kb` depends on the exact published version. Endpoint surface, error classes, retry/timeout policy, and design constraints are the repo's record (README + AGENTS.md); unit suite green; integration profile passed against live 3.8.3 (§10 M2 profile). |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
@@ -1915,8 +1911,6 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 | Decision | Choice | Rejected alternative | Where |
 | --- | --- | --- | --- |
-| Core package shape | Library-only, zero pi imports | Core as second pi plugin | §2 |
-| Transport | Kernel HTTP API | MCP bridge | §2 |
 | v1 scope | Lean agent-driven loop | RAG/graph/dream-cycle in v1 | §1, §6 |
 | Model neutrality | By construction (no model calls) | Provider abstraction layer | §1 |
 | Write-back layout | KB notebook(s), doc trees, block-ref provenance | Append-only journal; mixed into user notebooks | §4 |
@@ -1941,7 +1935,6 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Isolation | Soft (tool-level) | Hard (per-KB tokens/instances) | §6 |
 | Writes | Kernel API only; replace-first preference; identity-preserving ops; no whole-doc rewrites | Direct `.sy` access; removeDoc+recreate | §4, §7 |
 | Query scoping & certification | Three layers: parser-certified `box IN (...)` injection via `node-sql-parser@5.4.0` exact-pinned (AST rebuild + re-parse verify), kernel `mode: "readonly"`, post-filter backstop; parser bump gated by §10 checklist | Post-filter only; hand-rolled token scanner; agent-supplied filter; coords-based text splice | §3, §10 |
-| Search request shape | `paths: [<boxId>]` | A `boxes` JSON field | §3, §10 |
 | Agent-supplied query LIMIT | Passthrough uncapped; agent owns its budget | Clamping; rejecting large LIMITs | §3, §10 |
 | Multi-KB search fan-out | One kernel call per resolved KB, merged; per-call truncation accounting | One multi-`paths` call under one `pageSize`; raised `pageSize` | §3, §9, §10 |
 | Search method param | Tool-owned `method: 0`; aux params omitted (kernel defaults) | Agent-supplied `method`/aux params; tool-invented defaults | §3 |
@@ -1950,7 +1943,6 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 | Auth lockout | Breaker at 3 consecutive auth failures; 429 is its own class with a local cooldown deadline | Message-only 429 refusal; counting 429s toward the breaker; restart-only recovery | §2, §5, §9, §10 |
 | Encrypted notebooks | Rejected at `session_start` validation — one flag check, both lock states (`lsNotebooks` reports `encrypted: true` for locked boxes too) | Warn-and-proceed; a separate locked-box stale-ID drop branch | §5, §9, §10 |
 | Tool surface for reconciliation | `delete` + `move` modes (block/doc level); tool-fetched destination outline | Defer out of v1; insert-copy+delete for cross-doc moves | §4 |
-| Search transport | Named exception for `/api/search/fullTextSearchBlock` | SQL `content LIKE` only; MCP transport | §2, §3 |
 | Delete safety | Backlink check over the walk-enumerated delete set via documented SQL on `refs` | Guess from outline; separate backlinks tool | §4 |
 | Replace-section ref visibility | Pre-write refs count in the confirmation + post-write `invalidRefs` echo | Ref-preserving section rewrite (pairing heuristic) | §4, §10 |
 | Final-section trailing sweep | Sweep stays (exclusion leaves incoherent doc-end fragments under a supposedly-rewritten section); trailing content rides the delete-set content display, so it is never destroyed unseen | Excluding trailing content from the delete set; outline redesign to carry trailing blocks | §4, §10 |
