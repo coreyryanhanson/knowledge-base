@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validatePiKbSettings, type ValidationResult } from "./settings.js";
+import { validateGnubrainSettings, type ValidationResult } from "./settings.js";
 
 function expectErrors(result: ValidationResult): string[] {
 	if (result.ok) throw new Error("expected validation to fail");
@@ -10,7 +10,7 @@ function validConfig(
 	overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
 	return {
-		"pi-kb": {
+		gnubrain: {
 			baseUrl: "http://127.0.0.1:6806",
 			apiToken: "token",
 			kbs: [{ name: "dev", notebook: "20240101120000-abc1234" }],
@@ -19,30 +19,30 @@ function validConfig(
 	};
 }
 
-describe("validatePiKbSettings", () => {
+describe("validateGnubrainSettings", () => {
 	it("accepts a valid config", () => {
-		const result = validatePiKbSettings(validConfig());
+		const result = validateGnubrainSettings(validConfig());
 		expect(result.ok).toBe(true);
 	});
 
 	it("accepts absent optional keys, including defaultKBs", () => {
-		const result = validatePiKbSettings(validConfig());
+		const result = validateGnubrainSettings(validConfig());
 		expect(result.ok && result.settings.defaultKBs).toBeUndefined();
 		expect(result.ok && result.settings.allowUnattendedWrites).toBeUndefined();
 		expect(result.ok && result.settings.writeConfirmTimeout).toBeUndefined();
 	});
 
-	it("rejects a missing pi-kb object", () => {
-		expect(expectErrors(validatePiKbSettings({}))).toContain(
-			"settings.json must contain a 'pi-kb' object",
+	it("rejects a missing gnubrain object", () => {
+		expect(expectErrors(validateGnubrainSettings({}))).toContain(
+			"settings.json must contain a 'gnubrain' object",
 		);
 	});
 
-	it.each([null, [], "pi-kb", 42, { "pi-kb": 42 }])(
+	it.each([null, [], "gnubrain", 42, { gnubrain: 42 }])(
 		"rejects non-object raw config: %j",
 		(raw) => {
-			expect(expectErrors(validatePiKbSettings(raw))).toContain(
-				"settings.json must contain a 'pi-kb' object",
+			expect(expectErrors(validateGnubrainSettings(raw))).toContain(
+				"settings.json must contain a 'gnubrain' object",
 			);
 		},
 	);
@@ -53,8 +53,8 @@ describe("validatePiKbSettings", () => {
 		["kbs", "kbs is required and must be an array"],
 	])("rejects missing %s", (key, expected) => {
 		const config = validConfig();
-		delete (config["pi-kb"] as Record<string, unknown>)[key];
-		expect(expectErrors(validatePiKbSettings(config))).toContain(expected);
+		delete (config["gnubrain"] as Record<string, unknown>)[key];
+		expect(expectErrors(validateGnubrainSettings(config))).toContain(expected);
 	});
 
 	it.each([
@@ -80,7 +80,7 @@ describe("validatePiKbSettings", () => {
 		],
 	])("rejects bad type: %j", (overrides, expected) => {
 		expect(
-			expectErrors(validatePiKbSettings(validConfig(overrides))),
+			expectErrors(validateGnubrainSettings(validConfig(overrides))),
 		).toContain(expected);
 	});
 
@@ -97,8 +97,8 @@ describe("validatePiKbSettings", () => {
 		],
 	])("rejects surrounding whitespace on %s", (key, value, expected) => {
 		const config = validConfig();
-		(config["pi-kb"] as Record<string, unknown>)[key] = value;
-		expect(expectErrors(validatePiKbSettings(config))).toContain(expected);
+		(config["gnubrain"] as Record<string, unknown>)[key] = value;
+		expect(expectErrors(validateGnubrainSettings(config))).toContain(expected);
 	});
 
 	it.each([
@@ -134,13 +134,13 @@ describe("validatePiKbSettings", () => {
 			[{ name: "all", notebook: "a" }],
 		],
 	])("rejects %s", (expected, kbs) => {
-		expect(expectErrors(validatePiKbSettings(validConfig({ kbs })))).toContain(
-			expected,
-		);
+		expect(
+			expectErrors(validateGnubrainSettings(validConfig({ kbs }))),
+		).toContain(expected);
 	});
 
 	it("accepts the §5 special values: writeConfirmTimeout 0 and allowUnattendedWrites true", () => {
-		const result = validatePiKbSettings(
+		const result = validateGnubrainSettings(
 			validConfig({ writeConfirmTimeout: 0, allowUnattendedWrites: true }),
 		);
 		expect(result.ok).toBe(true);
@@ -151,13 +151,15 @@ describe("validatePiKbSettings", () => {
 	it("rejects a defaultKBs entry naming an unknown KB", () => {
 		expect(
 			expectErrors(
-				validatePiKbSettings(validConfig({ defaultKBs: ["missing"] })),
+				validateGnubrainSettings(validConfig({ defaultKBs: ["missing"] })),
 			),
 		).toContain("defaultKBs entry 'missing' does not match any configured KB");
 	});
 
 	it("accepts defaultKBs naming a configured KB and preserves it", () => {
-		const result = validatePiKbSettings(validConfig({ defaultKBs: ["dev"] }));
+		const result = validateGnubrainSettings(
+			validConfig({ defaultKBs: ["dev"] }),
+		);
 		expect(result.ok).toBe(true);
 		expect(result.ok && result.settings.defaultKBs).toEqual(["dev"]);
 	});

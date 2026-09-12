@@ -1,7 +1,7 @@
 {
-	"name": "pi-kb",
-	"version": "0.1.0",
-	"description": "SiYuan knowledge-base extension for pi: agent-driven memory loop with SiYuan as the storage engine.",
+	"name": "gnubrain",
+	"version": "0.0.0",
+	"description": "GNUbrain's Not gBrain: open-source agent memory for pi with SiYuan as the storage engine.",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
@@ -11,11 +11,14 @@
 	"author": "Corey Ryan Hanson",
 	"license": "AGPL-3.0-or-later",
 	"type": "module",
-	"pi": {
-		"extensions": [
-			"./index.ts"
-		]
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/coreyryanhanson/gnubrain.git"
 	},
+	"files": [
+		"index.ts",
+		"settings.ts"
+	],
 	"scripts": {
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit",

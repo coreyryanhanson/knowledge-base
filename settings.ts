@@ -1,4 +1,4 @@
-// §5 validation step 1 — offline shape validation of the `pi-kb` settings entry.
+// §5 validation step 1 — offline shape validation of the `gnubrain` settings entry.
 // No network, no kernel calls (those are validation steps 2–3, M2/M3).
 
 export interface KbEntry {
@@ -6,7 +6,7 @@ export interface KbEntry {
 	notebook: string;
 }
 
-export interface PiKbSettings {
+export interface GnubrainSettings {
 	baseUrl: string;
 	apiToken: string;
 	kbs: KbEntry[];
@@ -16,7 +16,7 @@ export interface PiKbSettings {
 }
 
 export type ValidationResult =
-	| { ok: true; settings: PiKbSettings }
+	| { ok: true; settings: GnubrainSettings }
 	| { ok: false; errors: string[] };
 
 // The only /kb reserved keyword (§5: no other subcommand surface exists in v1).
@@ -46,14 +46,14 @@ function checkName(name: string, errors: string[]): void {
 	}
 }
 
-export function validatePiKbSettings(raw: unknown): ValidationResult {
-	if (!isRecord(raw) || !isRecord(raw["pi-kb"])) {
+export function validateGnubrainSettings(raw: unknown): ValidationResult {
+	if (!isRecord(raw) || !isRecord(raw["gnubrain"])) {
 		return {
 			ok: false,
-			errors: ["settings.json must contain a 'pi-kb' object"],
+			errors: ["settings.json must contain a 'gnubrain' object"],
 		};
 	}
-	const config = raw["pi-kb"];
+	const config = raw["gnubrain"];
 	const errors: string[] = [];
 
 	if (!isNonEmptyString(config.baseUrl)) {
