@@ -135,27 +135,9 @@ repos green, `file:` dependency working):
   write confirmation.
 - Reads multi-KB config from settings.json; validates `kb` params against it.
 
-**Why library-only for the core (decision record):**
-
-| Question | Why library, not a plugin |
-| --- | --- |
-| Distribution | The library is published to npm (§1) — a second *pi plugin* surface would add a distribution channel to maintain (pi API churn, plugin discovery) while npm already covers the library's reuse; plugin-ness buys nothing the package boundary doesn't |
-| Context surface | A library contributes zero always-on tool tokens; a plugin adds a second tool wall |
-| Precedent | `pi-tool-masking` has no `pi.extensions` field — same shape, already validated |
-| Coupling | Core never carries pi API churn; a second consumer gets it for free |
-
-**Why kernel HTTP API, not the MCP server (decision record):**
-
-- Every MCP tool is a wrapper over an HTTP endpoint the core can call directly; MCP adds
-  JSON-RPC, capability negotiation, an SDK dependency, and a pinned protocol version without
-  adding capability.
-- There is no privilege advantage either way: SiYuan has exactly one API token
-  (`Conf.Api.Token`), and authenticating with it grants `RoleAdministrator` regardless of
-  transport (`authByAPIToken`, kernel/model/session.go). The kernel API is chosen despite
-  both paths being admin-token paths, not because of a lesser token.
-- The "remove MCP context overhead" goal is achieved *architecturally* regardless of
-  transport: pi never sees any SiYuan tool wall — the KB extension curates its own few tools.
-- Kernel API is community-stable and has years of wide usage.
+Library-only and kernel-HTTP-over-MCP are settled decisions (Appendix ledger rows
+"Core package shape" and "Transport" — choice and rejected alternative each); no M3
+work depends on re-reading the argument.
 
 ---
 
@@ -542,12 +524,10 @@ the kernel stores — it builds the submission path from ground truth:
 honest.** The kernel's create-when-exists behavior is *not* safe to lean on: since v3.7.0
 (commit `4f2148e3b`), `createDocsByHPath` never consults the blocktree for the final path
 segment, so a create on an existing path **mints a duplicate doc** — same hpath, fresh
-block ID, content written into the new doc, success returned. **No content-landed
-check (decision record)**: a content check is unimplementable as pinned — the
-kernel parses the submitted markdown into kramdown blocks with minted IDs, so a literal
-comparison against any stored field always fails, and loosened enough to pass it is
-vacuous. The by-ID assert plus the guard carry the whole value; content comparison would
-be mid-build policy invented against a bug that no longer exists.
+block ID, content written into the new doc, success returned. No content-landed check
+exists: the kernel re-parses the submitted markdown with minted block IDs, so no literal
+comparison against a stored field can pass — the by-ID assert plus the guard carry the
+whole value.
 
 **Title policy honesty — canonical mint + tiered dedup (decision record, R4).** "Same
 title → same address across sessions" was never *identity* determinism; it is determinism
@@ -1157,11 +1137,8 @@ duplicate doc, never a silent clobber.
   construction, and never a deadlocked turn on a blocking dialog), so even if the
   sub-protocol claim is wrong or drifts, an RPC write degrades to refused, never to
   unattended writes — a full client behaves like an interactive session with a remote
-  confirm UI, a minimal one degrades to refused writes. A live RPC integration pin was
-  considered and cut: it would test convenience, not safety — the only scenario that
-  widens the path is pi auto-answering `confirmed: true`, a harness bug no extension-side
-  test prevents. The sub-protocol behavior is checked once, manually, at first real RPC
-  use (§10 residual checklist). The timeout value is the
+confirm UI, a minimal one degrades to refused writes. The sub-protocol behavior is
+checked once, manually, at first real RPC use (§10 residual checklist). The timeout value is the
   **`pi-kb.writeConfirmTimeout`** setting (seconds, default 60 — pinned, not invented
   per implementer; this is the disruption-vs-oversight dial, so it is user-owned rather
   than a constant): `0` waits **indefinitely** (the dialog blocks the write until
@@ -1177,12 +1154,8 @@ duplicate doc, never a silent clobber.
   settings stay orthogonal: `writeConfirmTimeout` is how long to hold the dialog,
   `allowUnattendedWrites` is whether to ask at all (headless); never-asked is a typed
   opt-out in settings, never a side effect of a timeout value. The rejected-write message
-  names the enabling setting or the interactive path. Silence never grants unattended
-  writes; the opt-out is typed, in settings. (A per-session confirmation toggle was
-  considered and cut: `allowUnattendedWrites` already covers the only real opt-out —
-  headless — and confirmation off in an interactive session adds convenience, not
-  capability; the tuning need `writeConfirmTimeout` now serves is the disruption dial,
-  not a capability widening. Revisit if both knobs demonstrably still annoy.)
+names the enabling setting or the interactive path. Silence never grants unattended
+writes; the opt-out is typed, in settings.
 - **Scope (session state)**: active KB scope persisted via `pi.appendEntry("kb-scope", ...)`,
   read on `session_start`. This uses pi's native session persistence — survives session
   resume/fork, stays out of LLM context.
@@ -1512,6 +1485,10 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 - Host firewall (firewalld rich rule for the VM's tap subnet) is the network security
   boundary: it is what scopes kernel access to the VM, since the API token is a
   workspace-admin credential (see §6).
+- **The compose file must never contain `ACCESS_AUTH_CODE_BYPASS=true`** — it grants
+  anonymous admin (verified in M0: unauthenticated `/api/query/sql` returned data).
+  The access auth code stays non-empty via `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation
+  (value in gitignored `.env`, shape in `.env.example`).
 
 ## 9. Risks
 
@@ -1989,9 +1966,9 @@ external writers on a live workspace entirely: the kernel serializes its own wri
 
 | # | Milestone | Gate |
 | --- | --- | --- |
-| 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity: 200 (`{"code":0,"data":"3.8.2"}`) from the VM at `http://192.168.100.1:6806`; deployment: `HOST_SERVICE_PORTS` += 6806, firewalld rich rule for the VM subnet; SiYuan published on `192.168.100.1:6806`. **Auth posture (verified in second pass):** the original M0 test hit `/api/system/version`, which has no auth middleware, so it proved connectivity only — and the deployment then had `ACCESS_AUTH_CODE_BYPASS=true`, which granted anonymous admin (verified: unauthenticated `/api/query/sql` returned data). Fixed by setting a non-empty access auth code (removes the bypass; `${SIYUAN_ACCESS_AUTH_CODE:?...}` interpolation in compose, value in gitignored `.env`, shape in committed `.env.example`) and removing the bypass. Re-verified matrix: no token → `Auth failed [session]`; bogus token → rejected; real API token → `code:0` on `/api/notebook/lsNotebooks` and `/api/query/sql`. The `ACCESS_AUTH_CODE_BYPASS` line must never return to the compose file. Pinned version: **3.8.3** (re-pinned from 3.8.2 — deliberate upgrade: live `/api/system/version` probe now returns `{"code":0,"data":"3.8.3"}` and the `~/siyuan` checkout is at the v3.8.3 release commit; the M2 integration profile is the verification run required by the upgrade checklist and has passed against live 3.8.3 — a red behavior pin re-triggers the checklist). |
-| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green (`vitest run` + `tsc --noEmit`); extension loads in a real pi session, zero tools; offline §5 settings validator enforces the full rejection matrix. **No build step (B4):** the library ships raw `.ts` (`exports` points at `index.ts`) — pi loads TypeScript directly and a `dist/` hop would only force a rebuild per edit. `npm publish` ships the root `.ts` files verbatim (flat repo, no `src/`), and `pi-kb` switches its dependency from `file:` to the published version when it lands; no build step exists in either repo. |
-| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api` (`errors.ts`/`client.ts`/`types.ts` re-exported from `index.ts`; explicit per-module `files` list + `scripts/check-pack.mjs` in `prepublishOnly` and CI; no build step, M1 B4): typed methods for every documented endpoint the tool set uses plus the two named exceptions, required per-call `retryable` flag (single retry, reads only), 30 s per-attempt timeout, total status-first error mapping (`SiYuanApiError`/`SiYuanAuthError`/`SiYuanRateLimitError`/`SiYuanTimeoutError`/`SiYuanNetworkError` — base class never thrown), `getVersion()` with no gate or pinned constant. Unit suite (mocked `fetch`) green, `tsc --noEmit` clean, zero runtime deps / zero pi imports. Integration profile (`integration.si.test.ts`, self-skipping without env) passed against live 3.8.3 at `http://192.168.100.1:6806`, run manually from the dev VM: auth smoke matrix against a guarded endpoint, search `paths`-shape pin, verified-create *kernel-contract* pin (its *tool-path* case lands with the extension at M3) with a live `appendBlock` pinning the `data[0].doOperations[0]` transaction shape, and the auth-throttle contract pin (429 on the 7th bogus request; ≈ 4 min overwrite lock, waited out call-free). npm publish and the `pi-kb` `file:`→exact-version switch are M3 entry conditions, not done here. |
+| 0 | **VM→host connectivity + auth smoke test** — guarded endpoint probed with no token, a bogus token, and the real API token | ✅ **Done.** Connectivity + full auth matrix verified from the VM against `http://192.168.100.1:6806`; pinned kernel version **3.8.3** (deliberate upgrade, verified by the M2 integration profile per the §10 upgrade checklist). See §8 for the deployment posture and the `ACCESS_AUTH_CODE_BYPASS` warning. |
+| 1 | Repo scaffolds — two separate repositories (this doc + the `siyuan-kernel-api` repo): library package skeleton + settings schema on the extension side | ✅ **Done.** Both repos green; extension loads in a real pi session; offline §5 settings validator enforces the full rejection matrix. No build step in either repo — both ship raw `.ts` (`exports` → `index.ts`). |
+| 2 | `siyuan-kernel-api` client — typed endpoints, auth, version fetch (`getVersion()`, no gate — §2 ownership), mock-fetch unit tests | ✅ **Done.** Client complete in `~/siyuan-kernel-api`: typed methods for every documented endpoint the tool set uses plus the two named exceptions, per-call `retryable` flag (single retry, reads only), 30 s timeout, status-first error mapping (`SiYuanApiError`/`SiYuanAuthError`/`SiYuanRateLimitError`/`SiYuanTimeoutError`/`SiYuanNetworkError`), zero runtime deps. Unit suite green; integration profile passed against live 3.8.3 (auth smoke matrix, search `paths`-shape pin, verified-create kernel-contract pin with the `data[0].doOperations[0]` transaction shape, auth-throttle contract pin). npm publish and the `pi-kb` `file:`→exact-version switch are M3 entry conditions. |
 | 3 | KB extension — tool set, `kb` param validation, `/kb` command (on/off toggles incl. `all`, scope, chat state via `appendEntry`), interactive write confirmation | Tools callable from pi; scope survives session restart; `/kb <name> on` and `/kb all off` land mid-session; write confirmation refuse/allow verified; auth circuit breaker degrades after 3 consecutive auth failures; write-path integration suite green under the fixture policy (§10), incl. the title-guard kernel round-trip pin, the version-refusal contract pin (§2/§5), the stale-target contract pin (§4), and the headless `/kb` dispatch exercised for real (`/kb all off` from `pi -p` — converting the §5 scope-activation source-read claim into evidence before M4's harness depends on it) |
 | 4 | Loop validation — write-back conventions exercised on a real KB (e.g. recipes epub extraction) | **Automated recall harness passes end to end (§10)**: plant (kernel-asserted), restart, recall (nonce + transcript-proven tool use), negative control on deletion; residual manual checklist covers the interactive-only moments (write confirmation, status slot) |
 
